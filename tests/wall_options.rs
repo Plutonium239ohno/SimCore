@@ -148,6 +148,9 @@ fn stopping_heat_stays_behind_walls() {
         let v = vec2(-speed_for(&sim.cfg, 20.0, 12.0), 0.0);
         assert!(place_nucleus(&mut sim, vec2(490.0, 350.0), 6, 6, v));
         assert!(place_nucleus(&mut sim, vec2(508.0, 350.0), 2, 2, vec2(0.0, 0.0)));
+        // Matter on the carbon's own side for it to slow down in.
+        assert!(place_nucleus(&mut sim, vec2(490.0, 357.0), 1, 1, vec2(0.0, 0.0)));
+        assert!(place_nucleus(&mut sim, vec2(490.0, 343.0), 1, 1, vec2(0.0, 0.0)));
         run(&mut sim, 1);
         sim.bodies().values().find(|b| b.z == 2).unwrap().vel.length()
     };

@@ -47,12 +47,12 @@ fn presets_load_and_run() {
     for k in 0..scenes::PRESETS.len() {
         let mut sim = game_sim();
         scenes::load_preset(&mut sim, k);
-        assert!(sim.len() > 100, "preset {k} is empty");
+        assert!(sim.len() > 100 || !sim.reactor.spawners.is_empty(), "preset {k} is empty");
         for _ in 0..30 { sim.step(1.0 / 60.0, None); }
         assert!(sim.pos.iter().all(|p| p.is_finite()), "preset {k} blew up");
         // Nuclei stay whole: no nucleon wanders far from its nucleus.
         let max_speed = sim.vel.iter().map(|v| v.length()).fold(0.0, f32::max);
-        assert!(max_speed <= sim.cfg.max_speed + 1.0);
+        assert!(max_speed <= sim.cfg.max_speed + 1.0, "preset {k}: {max_speed} > {}", sim.cfg.max_speed);
     }
 }
 

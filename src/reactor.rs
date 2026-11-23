@@ -80,6 +80,10 @@ pub struct Sample {
     pub absorbed_w: f64,
     /// Kinetic power (W) put in by spawners and beams.
     pub beam_w: f64,
+    /// Decay heat (W): energy radioactive decays leave in the matter.
+    pub decay_w: f64,
+    /// Spawner throttle (0..1).
+    pub throttle: f32,
 }
 
 impl Sample {
@@ -100,6 +104,7 @@ struct Totals {
     q_released: f64,
     q_absorbed: f64,
     beam_mev: f64,
+    decay_heat: f64,
 }
 
 impl Totals {
@@ -114,6 +119,7 @@ impl Totals {
             q_released: st.q_released,
             q_absorbed: st.q_absorbed,
             beam_mev,
+            decay_heat: st.decay_heat,
         }
     }
 }
@@ -131,13 +137,13 @@ pub fn write_samples_csv<'a>(path: &std::path::Path, samples: impl IntoIterator<
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         f,
-        "time_s,free_neutrons,fissions_per_s,fusions_per_s,breakups_per_s,captures_per_s,decays_per_s,fission_power_w,reaction_power_released_w,reaction_power_absorbed_w,net_reaction_power_w,beam_power_w,rod_insertion,temperature_k,hottest_wall_k"
+        "time_s,free_neutrons,fissions_per_s,fusions_per_s,breakups_per_s,captures_per_s,decays_per_s,fission_power_w,reaction_power_released_w,reaction_power_absorbed_w,net_reaction_power_w,beam_power_w,decay_heat_w,feed_throttle,rod_insertion,temperature_k,hottest_wall_k"
     )?;
     let mut n = 0;
     for s in samples {
         writeln!(
             f,
-            "{:.2},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.3},{:.1},{:.1}",
+            "{:.2},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.3},{:.3},{:.1},{:.1}",
             s.t,
             s.neutrons,
             s.fission_rate,
@@ -150,6 +156,8 @@ pub fn write_samples_csv<'a>(path: &std::path::Path, samples: impl IntoIterator<
             s.absorbed_w,
             s.net_w(),
             s.beam_w,
+            s.decay_w,
+            s.throttle,
             s.insertion,
             s.temperature_k,
             s.hottest_wall_k
@@ -197,6 +205,21 @@ pub struct Reactor {
     /// Kinetic energy (MeV) spawners have put in so far.
     pub beam_mev: f64,
     site_timer: f32,
+    /// Electric and magnetic field regions.
+    pub fields: Vec<crate::field::Field>,
+    /// Detectors (boxes and lines that count what passes).
+    pub detectors: Vec<crate::detector::Detector>,
+    /// Scales every spawner's rate (0..1): the controller's and the rules'
+    /// handle on beams and fuel feeds.
+    pub throttle: f32,
+    pub controller: crate::control::Controller,
+    pub rules: Vec<crate::control::Rule>,
+    /// Set by a rule: the app should pause.
+    pub pause_request: bool,
+    /// Messages for the app's status line (rules that fired).
+    pub notices: Vec<String>,
+    /// Spent fuel taken out by the fuelling machine.
+    pub pool: crate::inventory::Pool,
 }
 
 impl Default for Reactor {
@@ -224,6 +247,14 @@ impl Default for Reactor {
             last: Totals::default(),
             beam_mev: 0.0,
             site_timer: 0.0,
+            fields: Vec::new(),
+            detectors: Vec::new(),
+            throttle: 1.0,
+            controller: crate::control::Controller::default(),
+            rules: Vec::new(),
+            pause_request: false,
+            notices: Vec::new(),
+            pool: crate::inventory::Pool::default(),
         }
     }
 }
@@ -232,14 +263,18 @@ pub const SAMPLE_DT: f32 = 0.25;
 /// Spawners pause above this many particles.
 pub const MAX_PARTICLES: usize = 40_000;
 
-/// Adds a nuclide at a rate, with a launch velocity.
+/// Adds a nuclide at a rate, with a launch velocity: a fuel feed, a
+/// propellant line, a neutron gun - or, with `beam` on, an accelerator beam
+/// of a set energy, width, energy spread and divergence, continuous or
+/// pulsed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spawner {
     pub pos: Vec2,
     pub z: u32,
     pub n: u32,
+    /// Launch velocity (beam mode: direction and energy per nucleon).
     pub vel: Vec2,
-    /// Nuclei per sim second.
+    /// Nuclei per sim second (while a pulse is on).
     pub rate: f32,
     pub acc: f32,
     pub spawned: u64,
@@ -248,12 +283,99 @@ pub struct Spawner {
     /// concentration controller. `keep == 0`: plain spawner at `pos`.
     pub keep: u32,
     pub area: Option<Rect>,
+    /// Beam mode: the settings below apply.
+    pub beam: bool,
+    /// Beam width (px) across the direction of flight.
+    pub width: f32,
+    /// Relative energy spread (1 sigma, 0.05 = 5%).
+    pub energy_spread: f32,
+    /// Angular divergence (1 sigma, radians).
+    pub divergence: f32,
+    /// Pulsed beam: on for `pulse_len` s every `pulse_period` s (0 = continuous).
+    pub pulse_period: f32,
+    pub pulse_len: f32,
+    /// Time since the spawner was made (pulse phase).
+    pub clock: f32,
+    /// Nuclei still to fire in a burst (timed rules), on top of the rate.
+    pub burst: u32,
 }
 
 impl Spawner {
     pub fn new(pos: Vec2, z: u32, n: u32, vel: Vec2, rate: f32) -> Self {
-        Self { pos, z, n, vel, rate, acc: 0.0, spawned: 0, keep: 0, area: None }
+        Self {
+            pos,
+            z,
+            n,
+            vel,
+            rate,
+            acc: 0.0,
+            spawned: 0,
+            keep: 0,
+            area: None,
+            beam: false,
+            width: 0.0,
+            energy_spread: 0.0,
+            divergence: 0.0,
+            pulse_period: 0.0,
+            pulse_len: 0.5,
+            clock: 0.0,
+            burst: 0,
+        }
     }
+
+    /// A beam of nuclide (z, n) at `mev_per_nucleon` along `dir`.
+    pub fn beam(cfg: &crate::sim::Config, pos: Vec2, z: u32, n: u32, dir: Vec2, mev_per_nucleon: f64, rate: f32) -> Self {
+        let mut s = Self::new(pos, z, n, Vec2::ZERO, rate);
+        s.beam = true;
+        s.width = 12.0;
+        s.set_energy(cfg, dir, mev_per_nucleon);
+        s
+    }
+
+    pub fn a(&self) -> u32 {
+        (self.z + self.n).max(1)
+    }
+
+    /// Kinetic energy per nucleon (MeV) it launches with.
+    pub fn energy_per_nucleon(&self, cfg: &crate::sim::Config) -> f64 {
+        energy_of(cfg, self.vel.length(), 1.0)
+    }
+
+    /// Aim along `dir` at `mev` per nucleon (capped by the speed limit).
+    pub fn set_energy(&mut self, cfg: &crate::sim::Config, dir: Vec2, mev: f64) {
+        let d = dir.normalize_or(Vec2::X);
+        self.vel = if mev <= 0.0 { Vec2::ZERO } else { d * speed_for(cfg, mev, 1.0).min(cfg.max_speed) };
+    }
+
+    /// Is the beam on now (pulse phase)?
+    pub fn firing(&self) -> bool {
+        self.pulse_period <= 0.0 || self.clock.rem_euclid(self.pulse_period) < self.pulse_len
+    }
+
+    /// The same beam coming the other way, so the two meet head-on where
+    /// this one's axis passes closest to `meet`.
+    pub fn mirrored(&self, meet: Vec2) -> Self {
+        let d = self.vel.normalize_or(Vec2::X);
+        let closest = self.pos + d * (meet - self.pos).dot(d);
+        let mut m = *self;
+        m.pos = closest * 2.0 - self.pos;
+        m.vel = -self.vel;
+        m.spawned = 0;
+        m.acc = 0.0;
+        m
+    }
+}
+
+/// Highest beam energy the speed limit allows (MeV per nucleon).
+pub fn max_beam_energy(cfg: &crate::sim::Config) -> f64 {
+    energy_of(cfg, cfg.max_speed, 1.0)
+}
+
+/// A normal deviate (Box-Muller).
+fn gauss() -> f32 {
+    let u = 1.0 - crate::rng::gen_range(0.0f32, 1.0);
+    let v = crate::rng::gen_range(0.0f32, 1.0);
+    (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos()
 }
 
 /// What a drain takes out.
@@ -363,6 +485,10 @@ impl Reactor {
             && self.spawners.is_empty()
             && self.drains.is_empty()
             && self.pumps.is_empty()
+            && self.fields.is_empty()
+            && self.detectors.is_empty()
+            && self.rules.is_empty()
+            && !self.controller.on
     }
 
     pub fn clear(&mut self) {
@@ -433,6 +559,40 @@ fn body_sizes(sim: &Sim) -> Vec<u32> {
     c
 }
 
+/// Where and how fast the next nucleus from `sp` starts: a point feed
+/// launches from a small disc at its set velocity; a beam spreads across
+/// its width with its energy spread and divergence.
+fn launch(sim: &Sim, sp: &Spawner) -> (Vec2, Vec2) {
+    if !sp.beam {
+        return (jitter(sim, sp, sp.pos), sp.vel);
+    }
+    let d = sp.vel.normalize_or(Vec2::X);
+    let side = Vec2::new(-d.y, d.x);
+    let at = sp.pos + side * (crate::rng::gen_range(-0.5f32, 0.5) * sp.width);
+    let mut v = sp.vel;
+    if v != Vec2::ZERO {
+        let e = energy_of(&sim.cfg, v.length(), 1.0) * (1.0 + (sp.energy_spread * gauss()) as f64).max(0.01);
+        let speed = speed_for(&sim.cfg, e, 1.0).min(sim.cfg.max_speed);
+        let a = sp.divergence * gauss();
+        let dir = Vec2::new(d.x * a.cos() - d.y * a.sin(), d.x * a.sin() + d.y * a.cos());
+        v = dir * speed;
+    }
+    (at, v)
+}
+
+/// A spot near `at` (a small disc, so a stream doesn't block itself).
+fn jitter(sim: &Sim, sp: &Spawner, at: Vec2) -> Vec2 {
+    let rn = sim.types[ids::NEUTRON as usize].radius;
+    let spread = if sim.point_nuclei {
+        4.0 * crate::nuclear::POINT_RADIUS
+    } else {
+        2.0 * rn * (((sp.z + sp.n) as f32 / 0.9069).sqrt() + 2.0)
+    };
+    let a = crate::rng::gen_range(0.0, std::f32::consts::TAU);
+    let d = spread * crate::rng::gen_range(0.0f32, 1.0).sqrt();
+    at + Vec2::new(a.cos(), a.sin()) * d
+}
+
 /// Per-frame reactor update: rod drive, neutron absorption in the rods,
 /// on-power refuelling, instruments. Called after the nuclear processing.
 pub fn update(sim: &mut Sim, dt: f32) {
@@ -465,15 +625,19 @@ pub fn update(sim: &mut Sim, dt: f32) {
 
     // ---- Spawners ----
     if sim.len() < MAX_PARTICLES {
+        let throttle = re.throttle.clamp(0.0, 1.0);
         for sp in re.spawners.iter_mut() {
-            sp.acc = (sp.acc + sp.rate * dt).min(3.0);
-            if sp.acc < 1.0 {
+            sp.clock += dt;
+            let rate = if sp.firing() { sp.rate * throttle } else { 0.0 };
+            sp.acc = (sp.acc + rate * dt).min(3.0);
+            if sp.acc < 1.0 && sp.burst == 0 {
                 continue;
             }
             if sp.keep > 0 {
                 let Some(area) = sp.area else { continue };
                 if count_in(sim, area, sp.z, sp.n) >= sp.keep {
                     sp.acc = sp.acc.min(1.0);
+                    sp.burst = 0;
                     continue;
                 }
                 // Somewhere in the area with room, or where light salt can
@@ -486,7 +650,7 @@ pub fn update(sim: &mut Sim, dt: f32) {
                     let ok = place_nucleus(sim, p, sp.z, sp.n, sp.vel)
                         || (sp.z + sp.n >= 20 && displace_light(sim, p, sp.z + sp.n) && place_nucleus(sim, p, sp.z, sp.n, sp.vel));
                     if ok {
-                        sp.acc -= 1.0;
+                        if sp.burst > 0 { sp.burst -= 1 } else { sp.acc -= 1.0 }
                         sp.spawned += 1;
                         re.beam_mev += energy_of(&sim.cfg, sp.vel.length(), (sp.z + sp.n) as f32);
                         added = true;
@@ -495,32 +659,26 @@ pub fn update(sim: &mut Sim, dt: f32) {
                 }
                 continue;
             }
-            while sp.acc >= 1.0 {
-                // Somewhere in a small disc, so a stream doesn't block itself;
-                // a few tries per frame in crowded places.
-                let rn = sim.types[ids::NEUTRON as usize].radius;
-                let spread = if sim.point_nuclei {
-                    4.0 * crate::nuclear::POINT_RADIUS
-                } else {
-                    2.0 * rn * (((sp.z + sp.n) as f32 / 0.9069).sqrt() + 2.0)
-                };
+            let mut tries = 0;
+            while (sp.acc >= 1.0 || sp.burst > 0) && tries < 64 {
+                tries += 1;
+                let (at, v) = launch(sim, sp);
                 let mut ok = false;
-                for _ in 0..6 {
-                    let a = crate::rng::gen_range(0.0, std::f32::consts::TAU);
-                    let d = spread * crate::rng::gen_range(0.0f32, 1.0).sqrt();
-                    if place_nucleus(sim, sp.pos + Vec2::new(a.cos(), a.sin()) * d, sp.z, sp.n, sp.vel) {
+                for k in 0..6 {
+                    let p = if k == 0 { at } else { jitter(sim, sp, at) };
+                    if place_nucleus(sim, p, sp.z, sp.n, v) {
                         ok = true;
                         break;
                     }
                 }
                 // Heavy nuclei (fuel salt) displace light carrier salt.
                 if !ok && sp.z + sp.n >= 20 && displace_light(sim, sp.pos, sp.z + sp.n) {
-                    ok = place_nucleus(sim, sp.pos, sp.z, sp.n, sp.vel);
+                    ok = place_nucleus(sim, sp.pos, sp.z, sp.n, v);
                 }
                 if ok {
-                    sp.acc -= 1.0;
+                    if sp.burst > 0 { sp.burst -= 1 } else { sp.acc -= 1.0 }
                     sp.spawned += 1;
-                    re.beam_mev += energy_of(&sim.cfg, sp.vel.length(), (sp.z + sp.n) as f32);
+                    re.beam_mev += energy_of(&sim.cfg, v.length(), (sp.z + sp.n) as f32);
                     added = true;
                 } else {
                     sp.acc = sp.acc.min(1.5); // blocked: try again next frame
@@ -643,6 +801,8 @@ pub fn sample(sim: &mut Sim, dt: f32) {
         released_w: watts(now.q_released - last.q_released),
         absorbed_w: watts(now.q_absorbed - last.q_absorbed),
         beam_w: watts(now.beam_mev - last.beam_mev),
+        decay_w: watts(now.decay_heat - last.decay_heat),
+        throttle: re.throttle,
     };
     re.recording.push(sample);
     re.samples.push_back(sample);
@@ -723,7 +883,15 @@ fn refuel(sim: &mut Sim, re: &mut Reactor, elapsed: f32) {
             }
         }
     }
+    discharge.sort_unstable();
+    discharge.dedup();
     if !discharge.is_empty() {
+        let t = sim.nuclear.time;
+        for tag in &discharge {
+            if let Some(&(_, a, z)) = bodies.get(tag) {
+                re.pool.items.push((z, a - z, t));
+            }
+        }
         let (kind, tag) = (&sim.kind, &sim.tag);
         let dead: Vec<bool> = (0..sim.len()).map(|i| sim.is_nuclear(i) && discharge.contains(&tag[i])).collect();
         let _ = kind;

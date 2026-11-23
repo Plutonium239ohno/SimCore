@@ -745,11 +745,17 @@ impl Sim {
         if self.pos.is_empty() {
             // Nothing to move, but spawners and sources may add something.
             if self.cfg.nuclear && !self.reactor.is_empty() {
+                self.nuclear.time += dt as f64;
                 crate::reactor::update(self, dt);
+                crate::reactor::sample(self, dt);
+                crate::control::update(self);
             }
             return;
         }
         let t0 = std::time::Instant::now();
+        if self.cfg.nuclear {
+            crate::nuclear::note_fast(self, dt);
+        }
         let t = self.table();
         // Cells slightly larger than the biggest particle diameter, so contacts
         // created by one substep of motion are still found in the 3x3 block.
@@ -773,7 +779,7 @@ impl Sim {
 
         // Collisions between nuclei are elastic: in neutral matter (no
         // field doing work) their kinetic energy should come out unchanged.
-        self.ke_before = if self.cfg.nuclear && self.cfg.matter && !self.cfg.coulomb && mouse.is_none() {
+        self.ke_before = if self.cfg.nuclear && self.cfg.matter && !self.cfg.coulomb && mouse.is_none() && self.reactor.fields.is_empty() {
             Some(crate::thermal::body_ke(self))
         } else {
             None
@@ -821,12 +827,27 @@ impl Sim {
             lap(4, &mut self.timings);
         }
 
+        // Overlap pushes (a product placed against a neighbour) can leave a
+        // particle faster than the speed limit for a frame: hold it to it.
+        {
+            let vmax = self.cfg.max_speed;
+            let ghost = &t.ghost;
+            let kind = &self.kind;
+            self.vel.par_iter_mut().enumerate().for_each(|(i, v)| {
+                if !ghost[kind[i] as usize] {
+                    *v = clamp_speed(*v, vmax);
+                }
+            });
+        }
+
         // Decays and reactions. Runs while the grid still matches particle order.
         if self.cfg.nuclear {
             crate::thermal::apply(self, dt);
             crate::nuclear::process(self, dt);
             crate::reactor::update(self, dt);
             crate::reactor::sample(self, dt);
+            crate::detector::update(self, dt);
+            crate::control::update(self);
         }
 
         // Photons/neutrinos that left the box are gone.
@@ -1077,6 +1098,11 @@ impl Sim {
         let vmax = cfg.max_speed;
         let (pos, vel, far, near, kind) = (&self.pos, &self.vel, &self.far, &self.near, &self.kind);
         let (nuc, nuc_vel) = (&self.nuc, &self.nuc_vel);
+        // Field regions act on charge: whole nuclei by their Z/A (at their
+        // centre, so a nucleus turns as one), leptons by their own.
+        let fields: &[crate::field::Field] = if cfg.nuclear { &self.reactor.fields } else { &[] };
+        let (nuc_z, nuc_mass, nuc_center) = (&self.nuc_z, &self.nuc_mass, &self.nuc_center);
+        let types = &self.types;
         // (Stopping and the heat bath act once per frame: see thermal.rs.)
         let int_damp = (-cfg.nuclear_damping * h).exp();
 
@@ -1102,7 +1128,19 @@ impl Sim {
                         a += d * (m.strength * (1.0 - dist / m.radius) / dist);
                     }
                 }
-                let mut v = clamp_speed((vel[i] + a * h) * damp, vmax);
+                let mut v = (vel[i] + a * h) * damp;
+                if !fields.is_empty() {
+                    let k = nuc[i] as usize;
+                    let (qm, at) = match (nuc_z.get(k), nuc_mass.get(k)) {
+                        (Some(&z), Some(&m)) if m > 0.0 => (z as f32 / m, nuc_center[k]),
+                        _ => {
+                            let t = &types[kind[i] as usize];
+                            (if t.mass > 0.0 { t.charge / t.mass } else { 0.0 }, p)
+                        }
+                    };
+                    v = crate::field::apply(fields, at, v, qm, h);
+                }
+                let mut v = clamp_speed(v, vmax);
                 if let Some(&vm) = nuc_vel.get(nuc[i] as usize) {
                     v = vm + (v - vm) * int_damp;
                 }

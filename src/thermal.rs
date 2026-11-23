@@ -186,23 +186,37 @@ pub fn apply(sim: &mut Sim, dt: f32) {
         let dens_cell = dens_reach;
         let mut dens_grid: HashMap<(i32, i32), Vec<usize>> = HashMap::default();
         for (k, x) in b.iter().enumerate() {
-            if x.a > 0 && !(x.z == 0 && x.a == 1) {
+            // Matter is what sits still: a beam or a spray of fragments
+            // doesn't stop itself.
+            let moving = st.fast.contains(&x.tag) || x.vel.length() > speed_for(&cfg, 0.1 * x.a as f64, x.a as f32);
+            if x.a > 0 && !(x.z == 0 && x.a == 1) && !moving {
                 dens_grid.entry(((x.com.x / dens_cell).floor() as i32, (x.com.y / dens_cell).floor() as i32)).or_default().push(k);
             }
         }
         let walls = &sim.walls;
+        // Rough body radius (for "is it touching matter yet?").
+        let body_r = |a: u32| if sim.point_nuclei && a >= 2 { crate::nuclear::POINT_RADIUS } else { r_n * (a as f32 / 0.9069).sqrt() };
         let matter_around = |k: usize| -> f32 {
             let p = b[k].com;
             let (cx, cy) = ((p.x / dens_cell).floor() as i32, (p.y / dens_cell).floor() as i32);
             let mut a = 0u32;
+            let mut gap = f32::MAX;
+            let rk = body_r(b[k].a);
             for gy in cy - 1..=cy + 1 {
                 for gx in cx - 1..=cx + 1 {
                     for &j in dens_grid.get(&(gx, gy)).map_or(&[][..], |v| &v[..]) {
-                        if j != k && b[j].com.distance_squared(p) < dens_reach * dens_reach && !walls.separates(p, b[j].com) {
+                        let d2 = b[j].com.distance_squared(p);
+                        if j != k && d2 < dens_reach * dens_reach && !walls.separates(p, b[j].com) {
                             a += b[j].a;
+                            gap = gap.min(d2.sqrt() - rk - body_r(b[j].a));
                         }
                     }
                 }
+            }
+            // Not inside the matter yet (approaching it from empty space):
+            // nothing to stop on.
+            if gap > 1.5 * r_n {
+                return 0.0;
             }
             let per_1000 = a as f32 / (std::f32::consts::PI * dens_reach * dens_reach) * 1000.0 * (2.0 / r_n).powi(2);
             (per_1000 / DENSE_MATTER).min(1.0)
@@ -210,7 +224,6 @@ pub fn apply(sim: &mut Sim, dt: f32) {
         let mut heat: Vec<(Vec2, f32, usize)> = Vec::new();
         let stop = (-cfg.stopping * dt).exp();
         let c = (-cfg.cooling * dt).exp();
-        let kick = (1.0 - c * c).max(0.0).sqrt();
         for (k, x) in b.iter().enumerate() {
             if x.a == 0 || x.z == 0 {
                 continue; // free neutrons (and neutron clusters) don't stop
@@ -222,9 +235,17 @@ pub fn apply(sim: &mut Sim, dt: f32) {
             // Fast: born in a nuclear event, or above ~100 keV per nucleon.
             let v_fast = speed_for(&cfg, 0.1 * x.a as f64, x.a as f32);
             let fast = st.fast.contains(&x.tag) || speed > v_fast;
+            // A fast ion feels the matter only where there is some.
+            let mut bath = c;
             if fast && cfg.stopping > 0.0 {
                 let f = matter_around(k);
-                let s2 = speed * if f >= 1.0 { stop } else { (-cfg.stopping * f * dt).exp() };
+                // Stopping power falls off with energy (Bethe: ~1/v^2): a
+                // GeV proton crosses metres of metal, a fission fragment
+                // stops in microns.
+                let per_u = energy_of(&cfg, speed, 1.0);
+                let g = f * (1.0 / per_u.max(1e-9)).powf(0.8).min(1.0) as f32;
+                bath = (-cfg.cooling * g * dt).exp();
+                let s2 = speed * if g >= 1.0 { stop } else { (-cfg.stopping * g * dt).exp() };
                 let new_v = if speed > 1e-6 { v * (s2 / speed) } else { v };
                 let lost = 0.5 * x.mass * (speed * speed - s2 * s2);
                 v = new_v;
@@ -238,7 +259,8 @@ pub fn apply(sim: &mut Sim, dt: f32) {
                 st.fast.remove(&x.tag);
             }
             if cfg.cooling > 0.0 {
-                v = v * c + gauss() * (v_th * std::f32::consts::FRAC_1_SQRT_2 * kick);
+                let kick = (1.0 - bath * bath).max(0.0).sqrt();
+                v = v * bath + gauss() * (v_th * std::f32::consts::FRAC_1_SQRT_2 * kick);
             }
             dv[k] += v - x.vel;
         }

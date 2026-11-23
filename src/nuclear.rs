@@ -238,6 +238,49 @@ impl Event {
 /// Events kept in the history (the oldest are dropped beyond this).
 pub const HISTORY_MAX: usize = 100_000;
 
+/// Births remembered (nucleus lineage).
+pub const BORN_MAX: usize = 300_000;
+
+/// How a nucleus came to be: the event (global history index; None for an
+/// unlogged instant breakup) and its parents as (tag, packed Z/N; tag
+/// u32::MAX = none).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Birth {
+    pub event: Option<u64>,
+    pub t: f64,
+    pub parents: [(u32, u32); 2],
+}
+
+impl NuclearState {
+    /// The logged event with global index `g`, if it is still kept.
+    pub fn event(&self, g: u64) -> Option<&Event> {
+        g.checked_sub(self.dropped).and_then(|k| self.history.get(k as usize))
+    }
+
+    /// Nuclei made from `tag` (by a reaction or decay it took part in).
+    pub fn children(&self, tag: u32) -> Vec<(u32, Birth)> {
+        let mut v: Vec<(u32, Birth)> = self.born.iter().filter(|(_, b)| b.parents.iter().any(|p| p.0 == tag)).map(|(t, b)| (*t, *b)).collect();
+        v.sort_by_key(|c| c.0);
+        v
+    }
+
+    /// Record that the tags made since `from` in this frame came from
+    /// `parents` in the event just logged (if `logged`).
+    fn link(&mut self, fr: &Frame, from: usize, parents: [(u32, u32); 2], logged: bool) {
+        let event = logged.then(|| (self.dropped + self.history.len() as u64).saturating_sub(1));
+        for &(t, _) in &fr.new_grace[from.min(fr.new_grace.len())..] {
+            if self.born.insert(t, Birth { event, t: self.time, parents }).is_none() {
+                self.born_order.push_back(t);
+            }
+        }
+        while self.born_order.len() > BORN_MAX {
+            if let Some(t) = self.born_order.pop_front() {
+                self.born.remove(&t);
+            }
+        }
+    }
+}
+
 /// Persistent nuclear bookkeeping shown in the UI.
 #[derive(Default)]
 pub struct NuclearState {
@@ -267,6 +310,13 @@ pub struct NuclearState {
     pub census: Vec<((u32, u32), u32)>,
     /// Also log instantaneous breakups of unbound nuclei.
     pub log_breakups: bool,
+    /// Heat left in the matter by radioactive decays so far (MeV; the
+    /// neutrinos' share is gone).
+    pub decay_heat: f64,
+    /// Where each nucleus came from: tag -> the event that made it and its
+    /// parents (oldest dropped beyond BORN_MAX).
+    pub born: HashMap<u32, Birth>,
+    born_order: VecDeque<u32>,
     /// Products of one event can't react with each other for a few frames:
     /// tag -> (event id, frames left).
     grace: HashMap<u32, (u64, u8)>,
@@ -276,7 +326,15 @@ pub struct NuclearState {
     /// range last frame (one interaction per pass).
     near: HashSet<(u32, u32)>,
     /// Products of nuclear events still moving fast (being stopped).
-    pub(crate) fast: HashSet<u32>,
+    pub fast: HashSet<u32>,
+    /// Fast charged nuclei at the start of this frame: (tag, centre,
+    /// velocity, radius). Their whole path through the frame is checked for
+    /// contacts: a fast ion that hit something mid-frame has bounced away
+    /// again by the end of it.
+    pub(crate) sweep: Vec<(u32, Vec2, Vec2, f32)>,
+    /// Velocities at the start of the frame of the nuclei in `sweep`: a
+    /// swept collision happens at the speed they came in with.
+    sweep_vel: HashMap<u32, Vec2>,
     /// (nucleus tag, wall) contacts last frame, for conductor walls.
     pub(crate) wall_touch: HashSet<(u32, u32)>,
     /// Pairs of connected conductor walls, for the walls' `version`.
@@ -513,6 +571,20 @@ fn run_steps(sim: &mut Sim, fr: &mut Frame, members: Vec<usize>, steps: &[Step],
     (products, cur)
 }
 
+/// Note the fast charged nuclei at the start of a frame (see `sweep`).
+pub fn note_fast(sim: &mut Sim, dt: f32) {
+    let r_n = sim.types[ids::NEUTRON as usize].radius;
+    let mut v = std::mem::take(&mut sim.nuclear.sweep);
+    v.clear();
+    for (tag, b) in sim.bodies() {
+        if b.z > 0 && b.vel.length() * dt > 2.0 {
+            let r = if b.parts == 1 { sim.types[if b.a() == 1 { ids::PROTON } else { ids::NUCLEUS } as usize].radius } else { r_n * (b.a() as f32 / 0.9069).sqrt() };
+            v.push((tag, b.pos, b.vel, r));
+        }
+    }
+    sim.nuclear.sweep = v;
+}
+
 /// Run one frame of nuclear physics. Must be called right after the
 /// substeps, while `sim.grid` still matches particle order.
 pub fn process(sim: &mut Sim, dt: f32) {
@@ -558,21 +630,68 @@ pub fn process(sim: &mut Sim, dt: f32) {
     let points = sim.point_nuclei;
     let mut cross: Vec<(usize, usize)> = Vec::new();
     {
-        let (pos, kind, tag, grid) = (&sim.pos, &sim.kind, &sim.tag, &sim.grid);
+        let (pos, vel, kind, tag, grid) = (&sim.pos, &sim.vel, &sim.kind, &sim.tag, &sim.grid);
         let radius = |i: usize| sim.types[kind[i] as usize].radius;
+        let charged = |i: usize| sim.zn_of(i).0 > 0;
+        // A fast ion that hit something during the substeps has usually
+        // bounced off again by the end of the frame: charged pairs closing
+        // or parting fast count as touching within the distance they
+        // cover in half a frame.
+        let cell = 1.0 / sim.grid.inv.max(1e-6);
         for i in 0..n {
             if !sim.is_nuclear(i) || (points && kind[i] == ids::NEUTRON) {
                 continue;
             }
-            grid.for_each_near(pos[i], 1, |j| {
-                if j > i && sim.is_nuclear(j) && tag[i] != tag[j] && !(points && kind[j] == ids::NEUTRON) {
-                    let t = (radius(i) + radius(j)) * 1.1;
-                    if pos[i].distance_squared(pos[j]) < t.max(touch) * t.max(touch) {
-                        cross.push((i, j));
+            let fast = charged(i) && vel[i].length() * dt > 2.0;
+            let reach = if fast { (((vel[i].length() * dt * 0.5).min(12.0) + 8.0) / cell).ceil() as i32 } else { 1 };
+            grid.for_each_near(pos[i], reach.max(1), |j| {
+                if j != i && (j > i || fast) && sim.is_nuclear(j) && tag[i] != tag[j] && !(points && kind[j] == ids::NEUTRON) {
+                    let mut t = ((radius(i) + radius(j)) * 1.1).max(touch);
+                    if charged(i) && charged(j) {
+                        t += ((vel[i] - vel[j]).length() * dt * 0.5).min(12.0);
+                    }
+                    if pos[i].distance_squared(pos[j]) < t * t {
+                        cross.push((i.min(j), i.max(j)));
                     }
                 }
             });
         }
+    }
+
+    // Swept contacts of fast charged nuclei.
+    if !st.sweep.is_empty() {
+        let mut first: HashMap<u32, usize> = HashMap::default();
+        for (k, c) in comps.iter().enumerate() {
+            first.insert(c.tag, k);
+        }
+        let r_nuc = sim.types[ids::NEUTRON as usize].radius;
+        let cell = 1.0 / sim.grid.inv.max(1e-6);
+        for &(tag, p0, v0, rad) in &st.sweep {
+            let Some(&ci) = first.get(&tag) else { continue };
+            let Some(&i0) = comps[ci].members.first() else { continue };
+            let before = cross.len();
+            let p1 = p0 + v0 * dt;
+            let seg = p1 - p0;
+            let l2 = seg.length_squared().max(1e-9);
+            let mid = (p0 + p1) * 0.5;
+            let reach = ((seg.length() * 0.5 + rad + 2.0 * r_nuc) / cell).ceil() as i32;
+            let (pos, kind, tg) = (&sim.pos, &sim.kind, &sim.tag);
+            sim.grid.for_each_near(mid, reach.max(1), |j| {
+                if j >= n || !sim.is_nuclear(j) || tg[j] == tag || (points && kind[j] == ids::NEUTRON) {
+                    return;
+                }
+                let q = pos[j];
+                let t = ((q - p0).dot(seg) / l2).clamp(0.0, 1.0);
+                let rj = sim.types[kind[j] as usize].radius;
+                if (p0 + seg * t).distance(q) < (rad + rj) * 1.05 {
+                    cross.push((i0.min(j), i0.max(j)));
+                }
+            });
+            if cross.len() > before {
+                st.sweep_vel.insert(tag, v0);
+            }
+        }
+        st.sweep.clear();
     }
 
     // ---- 2. Reactions between touching nuclei (rolled once per contact) ----
@@ -630,12 +749,16 @@ pub fn process(sim: &mut Sim, dt: f32) {
         st.next_event += 1;
         fr.event = st.next_event;
         let members = std::mem::take(&mut comps[k].members);
+        let from = fr.new_grace.len();
+        let parent = (comps[k].tag, crate::sim::pack_zn(z, nn));
         if let Some(msg) = decay(sim, &mut fr, &members, z, nn, mode, &nuc, &mut st) {
             comps[k].consumed = true;
             *st.counts.entry(mode).or_default() += 1;
-            if st.log_breakups || t > 1e-12 {
+            let logged = st.log_breakups || t > 1e-12;
+            if logged {
                 st.record(if mode == Mode::Fission { EventKind::Fission } else { EventKind::Decay }, msg);
             }
+            st.link(&fr, from, [parent, (u32::MAX, 0)], logged);
         }
     }
     let mut census: Vec<_> = census.into_iter().collect();
@@ -691,6 +814,8 @@ pub fn process(sim: &mut Sim, dt: f32) {
         }
     }
 
+    st.sweep_vel.clear();
+
     // ---- 5. Apply ----
     for (t, ev) in fr.new_grace.drain(..) {
         st.grace.insert(t, (ev, 20));
@@ -715,7 +840,8 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
         return false; // neutron + neutron: nothing binds
     }
     let (aa, ab) = ((za + na) as f32, (zb + nb) as f32);
-    let (va, vb) = (mean_vel(sim, &comps[a].members), mean_vel(sim, &comps[b].members));
+    let vel_of = |k: usize| st.sweep_vel.get(&comps[k].tag).copied().unwrap_or_else(|| mean_vel(sim, &comps[k].members));
+    let (va, vb) = (vel_of(a), vel_of(b));
     let (ca, cb) = (com(sim, &comps[a].members), com(sim, &comps[b].members));
     let mu = aa * ab / (aa + ab);
     // Collision energy from the *real* relative velocity: sim speeds are a
@@ -750,11 +876,22 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
         // close nuclear encounter, so reactions while it slows down are rare
         // (thick-target yields ~1e-6..1e-3). Sim contacts are far too
         // frequent, so they're scaled down. Neutrons are unaffected.
-        let thick = if sim.cfg.matter { 1e-3 } else { 1.0 };
+        // Fast ions (beyond ~100 MeV/u) go further than a nuclear mean
+        // free path before they stop: no suppression at ~1 GeV/u.
+        let e_lab = e / mu as f64;
+        let thick = if sim.cfg.matter { (e_lab / 1000.0).powf(1.5).clamp(1e-3, 1.0) } else { 1.0 };
         (reactions::penetrability(e, za, za + na, zb, zb + nb) * sim.cfg.tunneling as f64 * thick).min(1.0)
     };
     if !chance(p) {
         return false;
+    }
+    let from = fr.new_grace.len();
+    let parents = [(comps[a].tag, crate::sim::pack_zn(za, na)), (comps[b].tag, crate::sim::pack_zn(zb, nb))];
+    // Fast collisions shatter the nuclei instead of fusing them.
+    let e_lab = e / mu as f64;
+    if za + zb > 0 && chance(fragmentation_chance(e_lab)) && fragment(sim, st, fr, comps, a, b, e) {
+        st.link(fr, from, parents, true);
+        return true;
     }
     let (z, n) = (za + zb, na + nb);
     let e_star = reactions::capture_q(za, na, zb, nb) + e;
@@ -845,7 +982,9 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
     } else if (za, na) == (0, 1) || (zb, nb) == (0, 1) {
         st.captures += 1;
         ("neutron capture", EventKind::Capture)
-    } else if heaviest > (za + na).max(zb + nb) {
+    } else if heaviest > (za + na).max(zb + nb) || (q > 0.0 && za > 0 && zb > 0 && (za + na).max(zb + nb) <= 20) {
+        // Something heavier than either was made - or light nuclei reacted
+        // and gave out energy (p + B-11 → 3 He-4, Li-6 + D → 2 He-4).
         st.fusions += 1;
         ("fusion", EventKind::Fusion)
     } else {
@@ -860,7 +999,347 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
         q,
         format_energy(e),
     ));
+    st.link(fr, from, parents, true);
     true
+}
+
+/// Beam energy per nucleon (MeV/u, a projectile on a target at rest) where
+/// collisions start to shatter nuclei instead of fusing them, and where
+/// they all do. Real heavy-ion collisions go from fusion and deep-inelastic
+/// reactions below ~10 MeV/u to fragmentation above ~50-100 MeV/u.
+pub const FRAG_START: f64 = 15.0;
+pub const FRAG_FULL: f64 = 80.0;
+/// Above this (MeV/u) pions are made and relativity matters: beyond the model.
+pub const FRAG_RELATIVISTIC: f64 = 300.0;
+/// Excitation energy (MeV) a spectator remnant gets per nucleon sheared off
+/// (Gaimard-Schmidt).
+const E_PER_ABRADED: f64 = 13.3;
+
+/// Chance that a collision at `e_lab` MeV per nucleon fragments.
+pub fn fragmentation_chance(e_lab: f64) -> f64 {
+    let x = ((e_lab - FRAG_START) / (FRAG_FULL - FRAG_START)).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// Fraction of a disc of radius r1 that a disc of radius r2 at distance d
+/// overlaps.
+fn overlap_fraction(r1: f64, r2: f64, d: f64) -> f64 {
+    if d >= r1 + r2 {
+        return 0.0;
+    }
+    if d <= (r1 - r2).abs() {
+        return if r1 <= r2 { 1.0 } else { (r2 * r2) / (r1 * r1) };
+    }
+    let a1 = r1 * r1 * ((d * d + r1 * r1 - r2 * r2) / (2.0 * d * r1)).clamp(-1.0, 1.0).acos();
+    let a2 = r2 * r2 * ((d * d + r2 * r2 - r1 * r1) / (2.0 * d * r2)).clamp(-1.0, 1.0).acos();
+    let k = 0.5 * ((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2)).max(0.0).sqrt();
+    ((a1 + a2 - k) / (std::f64::consts::PI * r1 * r1)).clamp(0.0, 1.0)
+}
+
+/// Draw `k` nucleons from z protons and n neutrons: how many are protons.
+fn draw_protons(z: u32, n: u32, k: u32) -> u32 {
+    let (mut zr, mut nr, mut got) = (z, n, 0);
+    for _ in 0..k.min(z + n) {
+        if chance(zr as f64 / (zr + nr).max(1) as f64) {
+            zr -= 1;
+            got += 1;
+        } else {
+            nr -= 1;
+        }
+    }
+    got
+}
+
+/// Light clusters the hot overlap zone condenses into: free nucleons when
+/// it is hot, more d, t, He-3 and alphas when it is cooler.
+fn coalesce(mut z: u32, mut n: u32, t_mev: f64) -> Vec<(u32, u32)> {
+    let c = 0.6 * (-t_mev / 15.0).exp();
+    let mut out = Vec::new();
+    while z + n > 0 {
+        if chance(c) {
+            let options: [((u32, u32), f64); 4] = [((2, 2), 0.35), ((1, 1), 0.35), ((1, 2), 0.15), ((2, 1), 0.15)];
+            let ok: Vec<_> = options.iter().filter(|((cz, cn), _)| *cz <= z && *cn <= n).collect();
+            if !ok.is_empty() {
+                let total: f64 = ok.iter().map(|o| o.1).sum();
+                let mut r = gen_range(0.0, total);
+                let mut pick = ok[0].0;
+                for o in &ok {
+                    if r < o.1 {
+                        pick = o.0;
+                        break;
+                    }
+                    r -= o.1;
+                }
+                z -= pick.0;
+                n -= pick.1;
+                out.push(pick);
+                continue;
+            }
+        }
+        if chance(z as f64 / (z + n) as f64) {
+            z -= 1;
+            out.push((1, 0));
+        } else {
+            n -= 1;
+            out.push((0, 1));
+        }
+    }
+    out
+}
+
+/// Fragmentation (abrasion-ablation): where the two nuclei overlap
+/// (participants, from a random impact parameter) they are sheared off into
+/// a hot zone that flies apart as nucleons and light clusters; the rest of
+/// each nucleus (the spectators) carries on at its own velocity, excited by
+/// what it lost, and boils off nucleons (or fissions, if heavy). Energy and
+/// momentum are conserved. Returns false (nothing done) if the collision
+/// can't pay for it.
+fn fragment(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp], a: usize, b: usize, e: f64) -> bool {
+    let (za, na, zb, nb) = (comps[a].z, comps[a].n, comps[b].z, comps[b].n);
+    let (aa, ab) = (za + na, zb + nb);
+    let vel_of = |k: usize| st.sweep_vel.get(&comps[k].tag).copied().unwrap_or_else(|| mean_vel(sim, &comps[k].members));
+    let (va, vb) = (vel_of(a), vel_of(b));
+    let (ca, cb) = (com(sim, &comps[a].members), com(sim, &comps[b].members));
+    let (ua, ub) = (real_velocity(&sim.cfg, va), real_velocity(&sim.cfg, vb));
+    // Geometry (nuclear radii, fm) and a random impact parameter.
+    let (ra, rb) = (1.2 * (aa as f64).cbrt(), 1.2 * (ab as f64).cbrt());
+    let bimp = (ra + rb) * gen_range(0.0f64, 1.0).sqrt();
+    let pa = ((aa as f64 * overlap_fraction(ra, rb, bimp)).round() as u32).clamp(1, aa);
+    let pb = ((ab as f64 * overlap_fraction(rb, ra, bimp)).round() as u32).clamp(1, ab);
+    let zpa = draw_protons(za, na, pa);
+    let zpb = draw_protons(zb, nb, pb);
+    // Spectators; tiny or impossible remnants join the hot zone.
+    let mut spec = [(za - zpa, na - (pa - zpa)), (zb - zpb, nb - (pb - zpb))];
+    let mut part = [pa, pb];
+    let (mut zf, mut nf) = (zpa + zpb, (pa - zpa) + (pb - zpb));
+    for k in 0..2 {
+        let (z, n) = spec[k];
+        if z + n < 2 || z == 0 || (n == 0 && z > 1) {
+            zf += z;
+            nf += n;
+            part[k] += z + n;
+            spec[k] = (0, 0);
+        }
+    }
+    let (pa, pb) = (part[0] as f64, part[1] as f64);
+    let du2 = (ua.0 - ub.0).powi(2) + (ua.1 - ub.1).powi(2);
+    let e_rel = pa * pb / (pa + pb) * du2;
+    let pieces = coalesce(zf, nf, e_rel / (pa + pb));
+    if pieces.len() + spec.iter().filter(|s| s.0 + s.1 > 0).count() < 2 {
+        return false; // everything ended up in one piece: that's fusion, not this
+    }
+    // Nothing changed hands (two nucleons, say): just a scattering.
+    {
+        let mut out: Vec<(u32, u32)> = pieces.iter().copied().chain(spec.iter().copied().filter(|s| s.0 + s.1 > 0)).collect();
+        let mut inp = vec![(za, na), (zb, nb)];
+        out.sort_unstable();
+        inp.sort_unstable();
+        if out == inp {
+            return false;
+        }
+    }
+    let m_in = mass_excess(za, na) + mass_excess(zb, nb);
+    let m_mid: f64 = pieces.iter().map(|&(z, n)| mass_excess(z, n)).sum::<f64>()
+        + spec.iter().filter(|s| s.0 + s.1 > 0).map(|&(z, n)| mass_excess(z, n)).sum::<f64>();
+    let avail = e_rel + (m_in - m_mid);
+    if avail <= 0.0 {
+        return false;
+    }
+    // Excitation of the spectators, then what's left heats the hot zone.
+    let want = [
+        if spec[0].0 + spec[0].1 > 0 { E_PER_ABRADED * (aa - spec[0].0 - spec[0].1) as f64 } else { 0.0 },
+        if spec[1].0 + spec[1].1 > 0 { E_PER_ABRADED * (ab - spec[1].0 - spec[1].1) as f64 } else { 0.0 },
+    ];
+    let k = if want[0] + want[1] > 0.6 * avail { 0.6 * avail / (want[0] + want[1]) } else { 1.0 };
+    let mut ex = [want[0] * k, want[1] * k];
+    let mut e_th = avail - ex[0] - ex[1];
+    if pieces.len() < 2 {
+        // One piece can't share out heat by itself: the spectators take it.
+        let s = if spec[0].0 + spec[0].1 > 0 { 0 } else { 1 };
+        ex[s] += e_th;
+        e_th = 0.0;
+    }
+    // Hot-zone pieces: random directions and shares, zero total momentum in
+    // the zone's frame, total kinetic energy e_th (E = m u^2 in these units).
+    let uf = ((pa * ua.0 + pb * ub.0) / (pa + pb), (pa * ua.1 + pb * ub.1) / (pa + pb));
+    let masses: Vec<f64> = pieces.iter().map(|&(z, n)| (z + n) as f64).collect();
+    let mut us: Vec<(f64, f64)> = masses
+        .iter()
+        .map(|&m| {
+            let w = -(1.0 - gen_range(0.0f64, 1.0)).ln();
+            let d = random_unit();
+            let s = (w / m).sqrt();
+            (d.x as f64 * s, d.y as f64 * s)
+        })
+        .collect();
+    let mtot: f64 = masses.iter().sum();
+    let p = us.iter().zip(&masses).fold((0.0, 0.0), |acc, (u, m)| (acc.0 + m * u.0, acc.1 + m * u.1));
+    for u in us.iter_mut() {
+        u.0 -= p.0 / mtot;
+        u.1 -= p.1 / mtot;
+    }
+    let ke: f64 = us.iter().zip(&masses).map(|(u, m)| m * (u.0 * u.0 + u.1 * u.1)).sum();
+    let scale = if ke > 1e-30 { (e_th / ke).sqrt() } else { 0.0 };
+    let vel_of = |cfg: &Config, u: (f64, f64)| sim_velocity(cfg, (uf.0 + u.0 * scale, uf.1 + u.1 * scale));
+
+    st.next_event += 1;
+    fr.event = st.next_event;
+    let mut names: Vec<String> = Vec::new();
+    let mut out_zn: Vec<(u32, u32)> = Vec::new();
+    let steps: [Vec<Step>; 2] = [
+        if spec[0].0 + spec[0].1 > 0 { reactions::compound_decay(spec[0].0, spec[0].1, ex[0]) } else { Vec::new() },
+        if spec[1].0 + spec[1].1 > 0 { reactions::compound_decay(spec[1].0, spec[1].1, ex[1]) } else { Vec::new() },
+    ];
+    let single = comps[a].members.len() == 1 && comps[b].members.len() == 1;
+    if sim.point_nuclei && single {
+        let ids_ = [comps[a].members[0], comps[b].members[0]];
+        let vs = [va, vb];
+        let c = (ca + cb) * 0.5;
+        for (k, &(z, n)) in pieces.iter().enumerate() {
+            let u = random_unit();
+            let at = spot_near(sim, c, u, gen_range(2.0, 7.0), 2.0);
+            let v = vel_of(&sim.cfg, us[k]);
+            spawn_body(sim, fr, at, v, z, n);
+            names.push(nuclide_name(z, n));
+            out_zn.push((z, n));
+        }
+        for s in 0..2 {
+            let i = ids_[s];
+            let (z, n) = spec[s];
+            if z + n == 0 {
+                fr.dead[i] = true;
+                continue;
+            }
+            sim.set_point(i, z, n);
+            sim.vel[i] = vs[s].clamp_length_max(sim.cfg.max_speed);
+            retag(sim, fr, &[i]);
+            let (prods, _) = run_steps_point(sim, fr, i, &steps[s], vs[s]);
+            out_zn.extend(step_products(z, n, &steps[s]));
+            names.extend(prods);
+        }
+        comps[a].members.clear();
+        comps[b].members.clear();
+    } else {
+        let mut pool: Vec<usize> = Vec::new();
+        let mut spect: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+        let dirs = [(ca - cb).normalize_or(Vec2::X), (cb - ca).normalize_or(Vec2::X)];
+        for s in 0..2 {
+            let members = std::mem::take(&mut comps[if s == 0 { a } else { b }].members);
+            let (z, n) = spec[s];
+            if z + n == 0 {
+                pool.extend(members);
+                continue;
+            }
+            match split_side(sim, &members, z, n, dirs[s]) {
+                Some((keep, rest)) => {
+                    spect[s] = keep;
+                    pool.extend(rest);
+                }
+                None => pool.extend(members),
+            }
+        }
+        let mut ps: Vec<usize> = pool.iter().copied().filter(|&i| sim.kind[i] == ids::PROTON).collect();
+        let mut ns: Vec<usize> = pool.iter().copied().filter(|&i| sim.kind[i] == ids::NEUTRON).collect();
+        for (k, &(z, n)) in pieces.iter().enumerate() {
+            if ps.len() < z as usize || ns.len() < n as usize {
+                break;
+            }
+            let mut m: Vec<usize> = ps.split_off(ps.len() - z as usize);
+            m.extend(ns.split_off(ns.len() - n as usize));
+            let v = vel_of(&sim.cfg, us[k]);
+            set_vel(sim, &m, v);
+            retag(sim, fr, &m);
+            names.push(nuclide_name(z, n));
+            out_zn.push((z, n));
+        }
+        let vs = [va, vb];
+        for s in 0..2 {
+            let m = std::mem::take(&mut spect[s]);
+            if m.is_empty() {
+                continue;
+            }
+            set_vel(sim, &m, vs[s]);
+            retag(sim, fr, &m);
+            let (prods, _) = run_steps(sim, fr, m, &steps[s], vs[s]);
+            out_zn.extend(step_products(spec[s].0, spec[s].1, &steps[s]));
+            names.extend(prods);
+        }
+    }
+    comps[a].consumed = true;
+    comps[b].consumed = true;
+
+    let q = m_in - out_zn.iter().map(|&(z, n)| mass_excess(z, n)).sum::<f64>();
+    st.energy_released += q.max(0.0);
+    if q > 0.0 {
+        st.q_released += q;
+    } else {
+        st.q_absorbed -= q;
+    }
+    st.breakups += 1;
+    let mut names = group_products(names);
+    sort_products(&mut names);
+    let (big, small) = if aa >= ab { ((za, na), (zb, nb)) } else { ((zb, nb), (za, na)) };
+    let e_lab = e / (aa as f64 * ab as f64 / (aa + ab) as f64);
+    let note = if e_lab > FRAG_RELATIVISTIC { ", pions not modelled" } else { "" };
+    st.record(
+        EventKind::Breakup,
+        format!(
+            "{} + {} → {}  (fragmentation{note}, Q {:+.2} MeV, at {})",
+            nuclide_name(big.0, big.1),
+            nuclide_name(small.0, small.1),
+            names.join(" + "),
+            q,
+            format_energy(e),
+        ),
+    );
+    true
+}
+
+/// What a compound-decay chain on (z, n) leaves: emitted pieces, fission
+/// fragments and the residue.
+fn step_products(z: u32, n: u32, steps: &[Step]) -> Vec<(u32, u32)> {
+    let (mut rz, mut rn) = (z, n);
+    let mut out = Vec::new();
+    for s in steps {
+        match s {
+            Step::Emit { z: x, n: y, .. } if *x <= rz && *y <= rn && x + y < rz + rn => {
+                out.push((*x, *y));
+                rz -= x;
+                rn -= y;
+            }
+            Step::Fission(f) => {
+                out.push(f.light);
+                out.push(f.heavy);
+                out.extend(std::iter::repeat_n((0, 1), f.neutrons.len()));
+                return out;
+            }
+            _ => {}
+        }
+    }
+    out.push((rz, rn));
+    out
+}
+
+/// "n", "n", "p", "He-4", "He-4" -> "2n", "p", "2×He-4".
+fn group_products(names: Vec<String>) -> Vec<String> {
+    let mut counts: Vec<(String, u32)> = Vec::new();
+    for s in names {
+        if s.is_empty() || s == "γ" {
+            continue;
+        }
+        match counts.iter_mut().find(|c| c.0 == s) {
+            Some(c) => c.1 += 1,
+            None => counts.push((s, 1)),
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(s, k)| match (k, s.as_str()) {
+            (1, _) => s,
+            (k, "n" | "p") => format!("{k}{s}"),
+            (k, _) => format!("{k}×{s}"),
+        })
+        .collect()
 }
 
 /// Heaviest first, so the same reaction always reads the same way.
@@ -1040,6 +1519,7 @@ fn decay(
         }
     };
     st.energy_released += q.max(0.0);
+    st.decay_heat += crate::inventory::deposited(mode, if mode == Mode::Fission { q } else { q.max(0.0) });
     Some(text)
 }
 
@@ -1361,6 +1841,7 @@ fn decay_point(
         }
     };
     st.energy_released += q.max(0.0);
+    st.decay_heat += crate::inventory::deposited(mode, if mode == Mode::Fission { q } else { q.max(0.0) });
     Some(text)
 }
 

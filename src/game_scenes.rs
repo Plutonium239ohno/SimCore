@@ -182,10 +182,37 @@ pub fn to_text(sim: &Sim) -> String {
         }
         for sp in &re.spawners {
             let _ = write!(s, "spawner {} {} {} {} {} {} {}", sp.pos.x, sp.pos.y, sp.z, sp.n, sp.vel.x, sp.vel.y, sp.rate);
-            if let (k, Some(a)) = (sp.keep, sp.area) {
-                let _ = write!(s, " {k} {} {} {} {}", a.x, a.y, a.w, a.h);
+            let a = sp.area.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+            let _ = write!(s, " {} {} {} {} {}", sp.keep, a.x, a.y, a.w, a.h);
+            if sp.beam || sp.pulse_period > 0.0 {
+                let _ = write!(s, " beam {} {} {} {} {} {}", sp.beam as u8, sp.width, sp.energy_spread, sp.divergence, sp.pulse_period, sp.pulse_len);
             }
             let _ = writeln!(s);
+        }
+        for f in &re.fields {
+            let _ = writeln!(s, "field {} {} {} {} {} {} {}", f.rect.x, f.rect.y, f.rect.w, f.rect.h, f.e.x, f.e.y, f.b);
+        }
+        for d in &re.detectors {
+            use crate::detector::{DetShape, DetectFilter};
+            let (shape, a, b, c, e) = match d.shape {
+                DetShape::Box(r) => ("box", r.x, r.y, r.w, r.h),
+                DetShape::Line(p, q) => ("line", p.x, p.y, q.x, q.y),
+            };
+            let (fz, fnn) = match d.filter {
+                DetectFilter::Element(z) => (z, 0),
+                DetectFilter::Isotope(z, n) => (z, n),
+                _ => (0, 0),
+            };
+            let _ = writeln!(s, "detector {shape} {a} {b} {c} {e} {} {fz} {fnn} {}", d.filter.index(), d.light as u8);
+        }
+        if re.controller != crate::control::Controller::default() {
+            let _ = writeln!(s, "{}", re.controller.to_line());
+        }
+        for r in &re.rules {
+            let _ = writeln!(s, "{}", r.to_line());
+        }
+        if re.throttle != 1.0 {
+            let _ = writeln!(s, "throttle {}", re.throttle);
         }
         for d in &re.drains {
             let _ = writeln!(s, "drain {} {} {} {} {} {}", d.rect.x, d.rect.y, d.rect.w, d.rect.h, d.filter.code(), d.per_second);
@@ -275,12 +302,46 @@ pub fn from_text(sim: &mut Sim, text: &str) -> Result<(), String> {
             }
             Some("spawner") => {
                 let mut sp = Spawner::new(vec2(num(1), num(2)) * scale, num(3) as u32, num(4) as u32, vec2(num(5), num(6)), num(7));
-                if f.len() >= 13 {
+                if f.len() >= 13 && num(8) > 0.0 {
                     sp.keep = num(8) as u32;
                     sp.area = Some(Rect::new(num(9) * scale, num(10) * scale, num(11) * scale, num(12) * scale));
                 }
+                if let Some(k) = f.iter().position(|x| *x == "beam") {
+                    sp.beam = num(k + 1) != 0.0;
+                    sp.width = num(k + 2) * scale;
+                    sp.energy_spread = num(k + 3);
+                    sp.divergence = num(k + 4);
+                    sp.pulse_period = num(k + 5);
+                    sp.pulse_len = num(k + 6);
+                }
                 sim.reactor.spawners.push(sp);
             }
+            Some("field") => sim.reactor.fields.push(crate::field::Field::new(
+                Rect::new(num(1) * scale, num(2) * scale, num(3) * scale, num(4) * scale),
+                vec2(num(5), num(6)),
+                num(7),
+            )),
+            Some("detector") if f.len() >= 10 => {
+                use crate::detector::{DetShape, DetectFilter, Detector};
+                let shape = if f[1] == "line" {
+                    DetShape::Line(vec2(num(2), num(3)) * scale, vec2(num(4), num(5)) * scale)
+                } else {
+                    DetShape::Box(Rect::new(num(2) * scale, num(3) * scale, num(4) * scale, num(5) * scale))
+                };
+                let filter = DetectFilter::from_index(num(6) as usize, num(7) as u32, num(8) as u32);
+                sim.reactor.detectors.push(Detector::new(shape, filter, num(9) != 0.0));
+            }
+            Some("controller") => {
+                if let Some(c) = crate::control::Controller::from_fields(&f) {
+                    sim.reactor.controller = c;
+                }
+            }
+            Some("rule") => {
+                if let Some(r) = crate::control::Rule::from_fields(&f) {
+                    sim.reactor.rules.push(r);
+                }
+            }
+            Some("throttle") => sim.reactor.throttle = num(1).clamp(0.0, 1.0),
             Some("drain") => {
                 let mut d = Drain::new(Rect::new(num(1) * scale, num(2) * scale, num(3) * scale, num(4) * scale), DrainFilter::from_code(num(5) as u8));
                 d.per_second = num(6);
@@ -379,7 +440,16 @@ pub const ROCKET: usize = 7;
 /// Width of the control panel: presets centre themselves in the rest.
 pub const PANEL_W: f32 = 420.0;
 
-pub const PRESETS: [(&str, &str); 8] = [
+/// Indices of the fusion and accelerator scenarios.
+pub const DD: usize = 8;
+pub const DHE3: usize = 9;
+pub const PB11: usize = 10;
+pub const BOTTLE: usize = 11;
+pub const GENERATOR: usize = 12;
+pub const SPALLATION: usize = 13;
+pub const COLLIDER: usize = 14;
+
+pub const PRESETS: [(&str, &str); 15] = [
     ("Nuclear soup", "protons, neutrons and electrons: watch deuterium form by n-capture"),
     ("D-T fusion plasma", "hot deuterium + tritium: D + T → He-4 + n (17.6 MeV)"),
     ("U-235 chain reaction", "packed U-235 inside a neutron reflector, three stray neutrons"),
@@ -388,6 +458,13 @@ pub const PRESETS: [(&str, &str); 8] = [
     ("CNO cycle", "hot protons + C-12, tunnelling x1000: the cycle that powers big stars"),
     ("Molten-salt reactor", "fuel dissolved in salt pumped round a graphite column; on-line fuel feed and fission-product removal, heat exchanger to helium, freeze plug over a drain tank"),
     ("Nuclear thermal rocket", "a reactor heats a conductor plate; hydrogen pumped under it heats up and leaves through a nozzle"),
+    ("D-D fusion plasma", "hot deuterium alone: D + D → He-3 + n or T + p, about half each (3-4 MeV); needs hotter plasma than D-T"),
+    ("D-He-3 fusion plasma", "deuterium + helium-3: D + He-3 → He-4 + p (18.4 MeV), almost no neutrons - but even hotter"),
+    ("p-B-11 fusion plasma", "protons + boron-11: p + B-11 → 3 He-4 (8.7 MeV), no neutrons at all; the hardest to light (tunnelling ×30)"),
+    ("Magnetic bottle", "D-T plasma held in a magnetic field: the ions circle and stay in, the fusion neutrons fly straight out to the neutron detectors in the walls"),
+    ("Neutron generator", "a 1 MeV deuteron beam into a solid tritium target (tunnelling ×300): D + T → He-4 + 14 MeV neutron; as deuterium builds up in the target, D + D joins in (real generators see this too)"),
+    ("Spallation source", "a 1 GeV proton beam on a lead target: each proton shatters a nucleus and boils off a shower of neutrons"),
+    ("Heavy-ion collider", "two Ca-40 beams at 100 MeV/u head-on: the nuclei shatter (fragmentation); detectors count the charged and neutral debris"),
 ];
 
 /// Random velocity whose kinetic energy is about `mev` for mass `a`.
@@ -520,6 +597,13 @@ pub fn load_preset(sim: &mut Sim, which: usize) {
         }
         MSR => msr_preset(sim),
         ROCKET => rocket_preset(sim),
+        DD => plasma(sim, &[((1, 1), 500)], 0.10, 1.0),
+        DHE3 => plasma(sim, &[((1, 1), 250), ((2, 1), 250)], 0.20, 1.0),
+        PB11 => plasma(sim, &[((1, 0), 450), ((5, 6), 90)], 0.50, 30.0),
+        BOTTLE => bottle_preset(sim),
+        GENERATOR => generator_preset(sim),
+        SPALLATION => spallation_preset(sim),
+        COLLIDER => collider_preset(sim),
         _ => {
             // ~150 keV protons around carbon nuclei. Stars do this at a few
             // keV over millions of years; here tunnelling is boosted x1000.
@@ -541,6 +625,130 @@ pub fn load_preset(sim: &mut Sim, which: usize) {
     if points {
         crate::nuclear::set_point_mode(sim, true);
         fill_holes(sim);
+    }
+}
+
+/// A hot fusion plasma in vacuum: `fuel` ((Z, N), count) at about `mev`
+/// per nucleus. Energy is not compressed (real kinematics, a true
+/// Maxwellian), as in the D-T scene.
+fn plasma(sim: &mut Sim, fuel: &[((u32, u32), u32)], mev: f64, tunnel: f32) {
+    let (w, h) = (sim.width, sim.height);
+    sim.cfg = sim.cfg.clone().with_medium(false);
+    sim.cfg.energy_exponent = 1.0;
+    sim.cfg.tunneling = tunnel;
+    let left = if w > 1100.0 { PANEL_W } else { 0.0 };
+    let total: u32 = fuel.iter().map(|f| f.1).sum();
+    for k in 0..total {
+        // Interleave the species.
+        let mut r = k % total;
+        let mut pick = fuel[0].0;
+        for &(zn, c) in fuel {
+            if r < c {
+                pick = zn;
+                break;
+            }
+            r -= c;
+        }
+        let at = vec2(gen_range(left + 40.0, w - 40.0), gen_range(40.0, h - 40.0));
+        let v = thermal(sim, mev, (pick.0 + pick.1) as f32);
+        put(sim, at, pick.0, pick.1, v, 0);
+    }
+}
+
+/// A D-T plasma in a uniform magnetic field: the ions gyrate on circles a
+/// few tens of px across and stay put; neutral fusion neutrons fly straight
+/// out to neutron detectors lining the walls.
+fn bottle_preset(sim: &mut Sim) {
+    use crate::detector::{DetShape, DetectFilter, Detector};
+    let c = view_center(sim);
+    sim.cfg = sim.cfg.clone().with_medium(false);
+    sim.cfg.energy_exponent = 1.0;
+    sim.cfg.tunneling = 3.0;
+    let (bw, bh) = ((sim.width - PANEL_W).clamp(400.0, 900.0) * 0.8, (sim.height * 0.75).min(560.0));
+    let r = Rect::new(c.x - bw * 0.5, c.y - bh * 0.5, bw, bh);
+    // A D at 30 keV circles at ~40 px.
+    let v = speed_for(&sim.cfg, 0.03, 2.0);
+    let b = v / 40.0 * 2.0; // proton turn rate: a deuteron (q/m = 1/2) turns half as fast
+    sim.reactor.fields.push(crate::field::Field::new(r, Vec2::ZERO, b));
+    sim.walls.half = 2.0;
+    box_walls(sim, Rect::new(r.x - 6.0, r.y - 6.0, r.w + 12.0, r.h + 12.0), [WallKind::Conductor; 4]);
+    for (a, bb) in [(vec2(r.x - 14.0, r.y - 14.0), vec2(r.right() + 14.0, r.y - 14.0)), (vec2(r.x - 14.0, r.bottom() + 14.0), vec2(r.right() + 14.0, r.bottom() + 14.0))] {
+        sim.reactor.detectors.push(Detector::new(DetShape::Line(a, bb), DetectFilter::Element(0), false));
+    }
+    let inner = Rect::new(r.x + r.w * 0.2, r.y + r.h * 0.2, r.w * 0.6, r.h * 0.6);
+    for k in 0..360 {
+        let at = vec2(gen_range(inner.x, inner.right()), gen_range(inner.y, inner.bottom()));
+        let (z, n) = if k % 2 == 0 { (1, 1) } else { (1, 2) };
+        let v = thermal(sim, 0.03, (z + n) as f32);
+        put(sim, at, z, n, v, 0);
+    }
+}
+
+/// A deuteron beam onto a tritium target (a neutron generator: real ones
+/// fire ~100 keV deuterons into tritium-loaded titanium).
+fn generator_preset(sim: &mut Sim) {
+    use crate::detector::{DetShape, DetectFilter, Detector};
+    let c = view_center(sim);
+    // A solid target (matter: the tritium stays put and the beam slows in
+    // it); tunnelling boosted so the thick-target yield is watchable.
+    sim.cfg.tunneling = 300.0;
+    // Slowed down less than real (a real deuteron stops within microns),
+    // so it meets enough tritons on its way in.
+    sim.cfg.stopping = 2.0;
+    sim.cfg.cooling = 2.0;
+    let target = Rect::new(c.x + 40.0, c.y - 110.0, 110.0, 220.0);
+    fill_rect(sim, target, 1, 2, 1.0);
+    let mut beam = Spawner::beam(&sim.cfg, vec2(c.x - 300.0, c.y), 1, 1, Vec2::X, 0.5, 15.0);
+    beam.width = 160.0;
+    beam.energy_spread = 0.03;
+    sim.reactor.spawners.push(beam);
+    sim.reactor.drains.push(Drain::new(Rect::new(c.x - 370.0, c.y - 200.0, 20.0, 400.0), DrainFilter::All));
+    // Neutron counters: one over the target (every neutron made there), one
+    // beyond it (the ones that get out).
+    sim.reactor.detectors.push(Detector::new(DetShape::Box(Rect::new(target.x - 10.0, target.y - 10.0, target.w + 20.0, target.h + 20.0)), DetectFilter::Element(0), false));
+    sim.reactor.detectors.push(Detector::new(DetShape::Line(vec2(c.x + 260.0, c.y - 250.0), vec2(c.x + 260.0, c.y + 250.0)), DetectFilter::Element(0), false));
+}
+
+/// A proton beam into a heavy target: spallation.
+fn spallation_preset(sim: &mut Sim) {
+    use crate::detector::{DetShape, DetectFilter, Detector};
+    let c = view_center(sim);
+    // Solid lead (matter): the target holds together.
+    let target = Rect::new(c.x - 40.0, c.y - 120.0, 150.0, 240.0);
+    fill_rect(sim, target, 82, 126, 10.0);
+    let e = 1000.0f64.min(crate::reactor::max_beam_energy(&sim.cfg));
+    let mut beam = Spawner::beam(&sim.cfg, vec2(c.x - 380.0, c.y), 1, 0, Vec2::X, e, 3.0);
+    beam.width = 120.0;
+    sim.reactor.spawners.push(beam);
+    // Neutrons made in (or crossing) the region round the target, and the
+    // charged debris coming out of the back.
+    let ring = Rect::new(c.x - 120.0, c.y - 220.0, 340.0, 440.0);
+    sim.reactor.detectors.push(Detector::new(DetShape::Box(ring), DetectFilter::Neutral, false));
+    sim.reactor.detectors.push(Detector::new(DetShape::Line(vec2(ring.right() + 20.0, ring.y), vec2(ring.right() + 20.0, ring.bottom())), DetectFilter::Charged, false));
+    // What flies out is taken away at the sides.
+    let (w, h) = (sim.width, sim.height);
+    sim.reactor.drains.push(Drain::new(Rect::new(c.x - 420.0, 0.0, 15.0, h), DrainFilter::All));
+    sim.reactor.drains.push(Drain::new(Rect::new(w - 15.0, 0.0, 15.0, h), DrainFilter::All));
+}
+
+/// Two heavy-ion beams head-on.
+fn collider_preset(sim: &mut Sim) {
+    use crate::detector::{DetShape, DetectFilter, Detector};
+    let c = view_center(sim);
+    sim.cfg = sim.cfg.clone().with_medium(false);
+    let e = 100.0f64.min(crate::reactor::max_beam_energy(&sim.cfg));
+    let mut a = Spawner::beam(&sim.cfg, vec2(c.x - 380.0, c.y), 20, 20, Vec2::X, e, 4.0);
+    a.width = 30.0;
+    let b = a.mirrored(c);
+    sim.reactor.spawners.push(a);
+    sim.reactor.spawners.push(b);
+    let r = 170.0;
+    let up = (vec2(c.x - r, c.y - r), vec2(c.x + r, c.y - r));
+    let down = (vec2(c.x - r, c.y + r), vec2(c.x + r, c.y + r));
+    sim.reactor.detectors.push(Detector::new(DetShape::Line(up.0, up.1), DetectFilter::Charged, false));
+    sim.reactor.detectors.push(Detector::new(DetShape::Line(down.0, down.1), DetectFilter::Neutral, false));
+    for (x0, x1) in [(c.x - 420.0, c.x - 400.0), (c.x + 400.0, c.x + 420.0)] {
+        sim.reactor.drains.push(Drain::new(Rect::new(x0, c.y - 300.0, x1 - x0, 600.0), DrainFilter::All));
     }
 }
 
