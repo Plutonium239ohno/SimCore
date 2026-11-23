@@ -189,3 +189,25 @@ fn relative_energy_uses_real_velocities() {
     let e_rel = mu * ((frag.0 - n.0).powi(2) + (frag.1 - n.1).powi(2));
     assert!(e_rel > 0.5 && e_rel < 1.0, "{e_rel}");
 }
+
+/// The full-run recording exports as CSV, one row per sample.
+#[test]
+fn recording_exports_as_csv() {
+    let mut sim = sim_core::nuclear::game_sim(1600.0, 900.0);
+    sim.point_nuclei = true;
+    sim.seed = 2;
+    sim_core::game_scenes::load_preset(&mut sim, 3);
+    for _ in 0..300 {
+        sim.step(1.0 / 60.0, None);
+    }
+    let rec = &sim.reactor.recording;
+    assert!(rec.len() >= 10, "{} samples", rec.len());
+    assert!(rec.iter().all(|s| s.temperature_k > 100.0), "temperatures recorded");
+    let path = std::env::temp_dir().join(format!("reactor-test-{}.csv", std::process::id()));
+    let n = sim_core::reactor::write_samples_csv(&path, rec).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(n, rec.len());
+    assert_eq!(text.lines().count(), rec.len() + 1);
+    assert!(text.starts_with("time_s,free_neutrons,fissions_per_s,thermal_power_w"));
+}

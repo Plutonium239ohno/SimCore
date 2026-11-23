@@ -37,9 +37,12 @@ impl Zoom {
     }
 
     /// The magnified window, on the side of the screen away from the
-    /// source; `left` = screen px covered by a panel on the left.
-    pub fn dst(&self, left: f32) -> Rect {
-        let right = self.center.x < screen_width() * 0.5;
+    /// source; `left` = screen px covered by a panel on the left; `view` =
+    /// the world rectangle the main view shows (the screen, unless the app
+    /// pans and zooms).
+    pub fn dst(&self, left: f32, view: Rect) -> Rect {
+        let on_screen = (self.center.x - view.x) / view.w * screen_width();
+        let right = on_screen < screen_width() * 0.5;
         let x = if right { screen_width() - self.size - 10.0 } else { left + 10.0 };
         Rect::new(x, 10.0, self.size, self.size)
     }
@@ -55,14 +58,17 @@ impl Zoom {
         self.state = if self.state == ZoomState::Off { ZoomState::Aiming } else { ZoomState::Off };
     }
 
-    /// Source frame, magnified view and hint.
-    pub fn draw(&self, renderer: &mut Renderer, sim: &Sim, view: &View, left: f32) {
+    /// Source frame (on the main view, which shows world rect `main`),
+    /// magnified view and hint.
+    pub fn draw(&self, renderer: &mut Renderer, sim: &Sim, view: &View, left: f32, main: Rect) {
         if self.state == ZoomState::Off {
             return;
         }
-        let (src, dst) = (self.src(), self.dst(left));
+        let (src, dst) = (self.src(), self.dst(left, main));
         let frame_col = if self.state == ZoomState::Locked { Color::new(1.0, 0.85, 0.3, 0.9) } else { Color::new(1.0, 1.0, 1.0, 0.7) };
-        draw_rectangle_lines(src.x, src.y, src.w, src.h, 1.0, frame_col);
+        let k = screen_width() / main.w;
+        let f = Rect::new((src.x - main.x) * k, (src.y - main.y) * k, src.w * k, src.h * k);
+        draw_rectangle_lines(f.x, f.y, f.w, f.h, 1.0, frame_col);
         renderer.draw_region(sim, view, src, dst);
         draw_rectangle_lines(dst.x - 1.0, dst.y - 1.0, dst.w + 2.0, dst.h + 2.0, 2.0, frame_col);
         let hint = if self.state == ZoomState::Aiming { "click to lock, scroll to zoom" } else { "Z / Esc to close, scroll to zoom" };

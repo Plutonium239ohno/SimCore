@@ -37,7 +37,7 @@ impl OverlayKind {
 /// average over a few nuclei.
 const CELL: f32 = 20.0;
 /// Averaging time (sim seconds).
-const TAU_FLUX: f64 = 2.0;
+const TAU_FLUX: f64 = 4.0;
 const TAU_TEMP: f64 = 0.6;
 /// Thermal neutrons: below 1 eV.
 const THERMAL_MEV: f64 = 1e-6;
@@ -102,7 +102,13 @@ impl Overlay {
         match self.kind {
             OverlayKind::Temperature => {
                 // Mean kinetic energy per body relative to the cell's flow.
-                let bodies: Vec<_> = sim.bodies().into_values().filter(|b| b.a() > 1 || b.z > 0).collect();
+                // Fast ions (fragments being stopped, recoils) are not heat yet.
+                let bodies: Vec<_> = sim
+                    .bodies()
+                    .into_iter()
+                    .filter(|(tag, b)| (b.a() > 1 || b.z > 0) && !sim.nuclear.fast.contains(tag))
+                    .map(|(_, b)| b)
+                    .collect();
                 let mut flow = vec![(Vec2::ZERO, 0.0f32); cols * rows];
                 for b in &bodies {
                     let c = cell_of(b.pos);
@@ -154,7 +160,15 @@ impl Overlay {
                 *s = s.max(h);
             }
         }
-        let max = self.field.iter().zip(&self.seen).filter(|(_, s)| **s > 0.05).map(|(f, _)| *f).fold(0.0f32, f32::max);
+        // Top of the scale: the 95th percentile of occupied cells (one
+        // hot spot shouldn't wash out the rest).
+        let mut vals: Vec<f32> = self.field.iter().zip(&self.seen).filter(|(_, s)| **s > 0.05).map(|(f, _)| *f).collect();
+        let max = if vals.is_empty() {
+            0.0
+        } else {
+            let k = ((vals.len() - 1) as f32 * if temperature { 0.95 } else { 1.0 }) as usize;
+            *vals.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
+        };
         self.top = if self.top <= 0.0 { max } else { self.top + (max - self.top) * a.max(0.05) };
     }
 
@@ -186,8 +200,30 @@ impl Overlay {
             self.texture = None;
         }
         let amb = crate::thermal::theta_of(&sim.cfg, sim.cfg.temperature).max(1e-6);
-        let top = self.top.max(1e-9);
-        for (k, (&f, &s)) in self.field.iter().zip(&self.seen).enumerate() {
+        // Flux: a light 3x3 blur (a few dozen neutrons make a noisy field).
+        let field: Vec<f32> = if self.kind == OverlayKind::Temperature {
+            self.field.clone()
+        } else {
+            (0..cols * rows)
+                .map(|k| {
+                    let (x, y) = ((k % cols) as i32, (k / cols) as i32);
+                    let (mut sum, mut wsum) = (0.0, 0.0);
+                    for dy in -1..=1i32 {
+                        for dx in -1..=1i32 {
+                            let (u, v) = (x + dx, y + dy);
+                            if u >= 0 && v >= 0 && (u as usize) < cols && (v as usize) < rows {
+                                let w = if dx == 0 && dy == 0 { 4.0 } else if dx == 0 || dy == 0 { 2.0 } else { 1.0 };
+                                sum += self.field[v as usize * cols + u as usize] * w;
+                                wsum += w;
+                            }
+                        }
+                    }
+                    sum / wsum
+                })
+                .collect()
+        };
+        let top = if self.kind == OverlayKind::Temperature { self.top } else { field.iter().copied().fold(0.0f32, f32::max).min(self.top.max(1e-9)) }.max(1e-9);
+        for (k, (&f, &s)) in field.iter().zip(&self.seen).enumerate() {
             let (x, y) = ((k % cols) as u32, (k / cols) as u32);
             let mut c = match self.kind {
                 // Log scale from the ambient temperature up.
@@ -198,8 +234,13 @@ impl Overlay {
                 // Square-root scale: shows the edges of the flux too.
                 _ => crate::render::heat((f / top).clamp(0.0, 1.0).sqrt()),
             };
+            // Cool cells fade out, so the hot ones stand out.
+            let level = match self.kind {
+                OverlayKind::Temperature => ((f.max(amb) / amb).ln() / (top.max(amb * 1.5) / amb).ln()).clamp(0.0, 1.0),
+                _ => 1.0,
+            };
             let shown = match self.kind {
-                OverlayKind::Temperature => s,
+                OverlayKind::Temperature => s * (0.1 + 0.9 * level),
                 _ => (f / top * 20.0).min(1.0) * s,
             };
             c.a = self.opacity * shown.clamp(0.0, 1.0);
