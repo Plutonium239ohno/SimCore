@@ -187,6 +187,12 @@ pub fn to_text(sim: &Sim) -> String {
             if sp.beam || sp.pulse_period > 0.0 {
                 let _ = write!(s, " beam {} {} {} {} {} {}", sp.beam as u8, sp.width, sp.energy_spread, sp.divergence, sp.pulse_period, sp.pulse_len);
             }
+            if sp.is_mix() {
+                let _ = write!(s, " mix {}", sp.mix_random as u8);
+                for (z, n, w) in sp.nuclides() {
+                    let _ = write!(s, " {z} {n} {w}");
+                }
+            }
             let _ = writeln!(s);
         }
         for f in &re.fields {
@@ -313,6 +319,14 @@ pub fn from_text(sim: &mut Sim, text: &str) -> Result<(), String> {
                     sp.divergence = num(k + 4);
                     sp.pulse_period = num(k + 5);
                     sp.pulse_len = num(k + 6);
+                }
+                if let Some(k) = f.iter().position(|x| *x == "mix") {
+                    let random = num(k + 1) != 0.0;
+                    let g = |x: &str| x.parse::<f32>().unwrap_or(0.0);
+                    let list: Vec<(u32, u32, u8)> =
+                        f[(k + 2).min(f.len())..].chunks(3).filter(|c| c.len() == 3).map(|c| (g(c[0]) as u32, g(c[1]) as u32, g(c[2]).clamp(0.0, 255.0) as u8)).collect();
+                    sp.set_mix(&list);
+                    sp.mix_random = random;
                 }
                 sim.reactor.spawners.push(sp);
             }

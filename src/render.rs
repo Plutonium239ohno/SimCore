@@ -515,7 +515,7 @@ pub fn draw_reactor(sim: &Sim) {
             draw_line(tip.x, tip.y, tip.x + back.x + side.x, tip.y + back.y + side.y, 1.0, c);
             draw_line(tip.x, tip.y, tip.x + back.x - side.x, tip.y + back.y - side.y, 1.0, c);
         }
-        draw_text(&nuclide_name(sp.z, sp.n), sp.pos.x + 6.0, sp.pos.y - 6.0, 13.0, c);
+        draw_text(&sp.label(), sp.pos.x + 6.0, sp.pos.y - 6.0, 13.0, c);
     }
     for d in &re.drains {
         let r = d.rect;

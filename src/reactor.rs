@@ -298,7 +298,16 @@ pub struct Spawner {
     pub clock: f32,
     /// Nuclei still to fire in a burst (timed rules), on top of the rate.
     pub burst: u32,
+    /// Several nuclides instead of (z, n): (Z, N, weight), unused slots
+    /// weight 0. In turn, each comes `weight` times in a row; at random,
+    /// each is picked in proportion to its weight.
+    pub mix: [(u16, u16, u8); MIX_MAX],
+    pub mix_random: bool,
+    mix_next: u32,
 }
+
+/// Most nuclides one spawner can mix.
+pub const MIX_MAX: usize = 8;
 
 impl Spawner {
     pub fn new(pos: Vec2, z: u32, n: u32, vel: Vec2, rate: f32) -> Self {
@@ -320,7 +329,64 @@ impl Spawner {
             pulse_len: 0.5,
             clock: 0.0,
             burst: 0,
+            mix: [(0, 0, 0); MIX_MAX],
+            mix_random: false,
+            mix_next: 0,
         }
+    }
+
+    /// The nuclides it fires: (Z, N, weight). Just (z, n) without a mix.
+    pub fn nuclides(&self) -> Vec<(u32, u32, u8)> {
+        let v: Vec<(u32, u32, u8)> = self.mix.iter().filter(|m| m.2 > 0).map(|m| (m.0 as u32, m.1 as u32, m.2)).collect();
+        if v.is_empty() { vec![(self.z, self.n, 1)] } else { v }
+    }
+
+    /// Fire a mix (up to MIX_MAX nuclides; an empty list goes back to (z, n)).
+    /// (z, n) becomes the first of them.
+    pub fn set_mix(&mut self, list: &[(u32, u32, u8)]) {
+        self.mix = [(0, 0, 0); MIX_MAX];
+        for (slot, &(z, n, w)) in self.mix.iter_mut().zip(list.iter().filter(|m| m.2 > 0 && m.0 + m.1 > 0)) {
+            *slot = (z as u16, n as u16, w);
+        }
+        if let Some(&(z, n, _)) = list.iter().find(|m| m.2 > 0 && m.0 + m.1 > 0) {
+            self.z = z;
+            self.n = n;
+        }
+        self.mix_next = 0;
+    }
+
+    pub fn is_mix(&self) -> bool {
+        self.mix.iter().filter(|m| m.2 > 0).count() > 1
+    }
+
+    /// "He-4", "D + T", "p + B-11 (random)".
+    pub fn label(&self) -> String {
+        let l = self.nuclides();
+        let names: Vec<String> = l
+            .iter()
+            .map(|&(z, n, w)| {
+                let name = nucdata::nuclide_name(z, n);
+                if l.len() > 1 && w > 1 { format!("{w}×{name}") } else { name }
+            })
+            .collect();
+        if l.len() > 1 && self.mix_random { format!("{} (random)", names.join(" + ")) } else { names.join(" + ") }
+    }
+
+    /// The nuclide the next one will be.
+    fn peek(&self) -> (u32, u32) {
+        let l = self.nuclides();
+        if l.len() == 1 {
+            return (l[0].0, l[0].1);
+        }
+        let total: u32 = l.iter().map(|m| m.2 as u32).sum();
+        let mut k = if self.mix_random { crate::rng::gen_range(0, total) } else { self.mix_next % total };
+        for &(z, n, w) in &l {
+            if k < w as u32 {
+                return (z, n);
+            }
+            k -= w as u32;
+        }
+        (l[0].0, l[0].1)
     }
 
     /// A beam of nuclide (z, n) at `mev_per_nucleon` along `dir`.
@@ -564,7 +630,7 @@ fn body_sizes(sim: &Sim) -> Vec<u32> {
 /// its width with its energy spread and divergence.
 fn launch(sim: &Sim, sp: &Spawner) -> (Vec2, Vec2) {
     if !sp.beam {
-        return (jitter(sim, sp, sp.pos), sp.vel);
+        return (jitter(sim, sp.z + sp.n, sp.pos), sp.vel);
     }
     let d = sp.vel.normalize_or(Vec2::X);
     let side = Vec2::new(-d.y, d.x);
@@ -581,12 +647,12 @@ fn launch(sim: &Sim, sp: &Spawner) -> (Vec2, Vec2) {
 }
 
 /// A spot near `at` (a small disc, so a stream doesn't block itself).
-fn jitter(sim: &Sim, sp: &Spawner, at: Vec2) -> Vec2 {
+fn jitter(sim: &Sim, a: u32, at: Vec2) -> Vec2 {
     let rn = sim.types[ids::NEUTRON as usize].radius;
     let spread = if sim.point_nuclei {
         4.0 * crate::nuclear::POINT_RADIUS
     } else {
-        2.0 * rn * (((sp.z + sp.n) as f32 / 0.9069).sqrt() + 2.0)
+        2.0 * rn * ((a.max(1) as f32 / 0.9069).sqrt() + 2.0)
     };
     let a = crate::rng::gen_range(0.0, std::f32::consts::TAU);
     let d = spread * crate::rng::gen_range(0.0f32, 1.0).sqrt();
@@ -662,23 +728,25 @@ pub fn update(sim: &mut Sim, dt: f32) {
             let mut tries = 0;
             while (sp.acc >= 1.0 || sp.burst > 0) && tries < 64 {
                 tries += 1;
+                let (z, n) = sp.peek();
                 let (at, v) = launch(sim, sp);
                 let mut ok = false;
                 for k in 0..6 {
-                    let p = if k == 0 { at } else { jitter(sim, sp, at) };
-                    if place_nucleus(sim, p, sp.z, sp.n, v) {
+                    let p = if k == 0 { at } else { jitter(sim, z + n, at) };
+                    if place_nucleus(sim, p, z, n, v) {
                         ok = true;
                         break;
                     }
                 }
                 // Heavy nuclei (fuel salt) displace light carrier salt.
-                if !ok && sp.z + sp.n >= 20 && displace_light(sim, sp.pos, sp.z + sp.n) {
-                    ok = place_nucleus(sim, sp.pos, sp.z, sp.n, v);
+                if !ok && z + n >= 20 && displace_light(sim, sp.pos, z + n) {
+                    ok = place_nucleus(sim, sp.pos, z, n, v);
                 }
                 if ok {
                     if sp.burst > 0 { sp.burst -= 1 } else { sp.acc -= 1.0 }
                     sp.spawned += 1;
-                    re.beam_mev += energy_of(&sim.cfg, v.length(), (sp.z + sp.n) as f32);
+                    sp.mix_next = sp.mix_next.wrapping_add(1);
+                    re.beam_mev += energy_of(&sim.cfg, v.length(), (z + n) as f32);
                     if sp.beam {
                         let t = sim.next_tag;
                         sim.nuclear.beam.insert(t);

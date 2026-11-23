@@ -228,3 +228,38 @@ fn new_parts_survive_save_and_load() {
     assert_eq!(re.rules[0].trigger, Trigger::Above(Measure::Neutrons, 50.0));
     assert!(re.controller.on);
 }
+
+#[test]
+fn spawner_mixes_nuclides() {
+    // In turn: D, T, T, D, T, T...
+    let mut sim = vacuum();
+    let mut b = Spawner::beam(&sim.cfg, vec2(200.0, 400.0), 1, 1, Vec2::X, 1.0, 30.0);
+    b.width = 200.0;
+    b.set_mix(&[(1, 1, 1), (1, 2, 2)]);
+    assert!(b.is_mix() && b.label() == "H-2 + 2×H-3", "{}", b.label());
+    sim.reactor.spawners.push(b);
+    run(&mut sim, 60);
+    let bodies = sim.bodies();
+    let d = bodies.values().filter(|b| (b.z, b.n) == (1, 1)).count() as f32;
+    let t = bodies.values().filter(|b| (b.z, b.n) == (1, 2)).count() as f32;
+    assert!(d > 3.0 && (t / d - 2.0).abs() < 0.5, "D {d} T {t}");
+    // At random, by weight.
+    let mut sim = vacuum();
+    let mut b = Spawner::beam(&sim.cfg, vec2(200.0, 400.0), 1, 0, Vec2::X, 1.0, 30.0);
+    b.width = 300.0;
+    b.set_mix(&[(1, 0, 3), (2, 2, 1), (5, 6, 0)]);
+    b.mix_random = true;
+    sim.reactor.spawners.push(b);
+    run(&mut sim, 240);
+    let bodies = sim.bodies();
+    let p = bodies.values().filter(|b| (b.z, b.n) == (1, 0)).count();
+    let a = bodies.values().filter(|b| (b.z, b.n) == (2, 2)).count();
+    assert!(bodies.values().all(|b| (b.z, b.n) != (5, 6)));
+    assert!(p > a && a > 3, "p {p} alpha {a}");
+    // Saved and loaded.
+    let text = scenes::to_text(&sim);
+    let mut other = vacuum();
+    scenes::from_text(&mut other, &text).unwrap();
+    assert_eq!(other.reactor.spawners[0].nuclides(), vec![(1, 0, 3), (2, 2, 1)]);
+    assert!(other.reactor.spawners[0].mix_random);
+}

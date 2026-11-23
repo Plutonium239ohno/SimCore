@@ -542,7 +542,8 @@ impl Gui {
             return false;
         }
         let old = *v;
-        self.text(label, r.x, r.y + 6.0, self.size, col::TEXT);
+        let shown = label.split_once("##").map_or(label, |p| p.0);
+        self.text(shown, r.x, r.y + 6.0, self.size, col::TEXT);
         let bw = 34.0;
         let vw = 56.0;
         let x1 = r.x + r.w - bw;
