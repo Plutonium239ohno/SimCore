@@ -95,12 +95,6 @@ impl Target {
         true
     }
 
-    fn camera(&self) -> Camera2D {
-        let mut cam = Camera2D::from_display_rect(Rect::new(0.0, 0.0, self.w as f32, self.h as f32));
-        cam.render_target = Some(self.rt.clone());
-        cam
-    }
-
     /// Draw the target over the whole screen.
     fn blit(&self) {
         draw_texture_ex(&self.rt.texture, 0.0, 0.0, WHITE, DrawTextureParams {
@@ -115,6 +109,8 @@ impl Target {
 pub struct Renderer {
     disc: Texture2D,
     opaque_mat: Material,
+    /// World rectangle the trail image was drawn with.
+    trail_src: Option<Rect>,
     /// Temperature / flux overlay (see `View::overlay`).
     pub overlay: crate::overlay::Overlay,
     trail: Option<Target>,
@@ -202,6 +198,7 @@ impl Renderer {
             disc: disc_texture(),
             opaque_mat: material(OPAQUE_FRAG, None, vec![]),
             overlay: Default::default(),
+            trail_src: None,
             trail: None,
             colors: Vec::new(),
             nuclei: HashMap::default(),
@@ -272,20 +269,37 @@ impl Renderer {
     }
 
     pub fn draw(&mut self, sim: &Sim, view: &View) {
+        let screen = Rect::new(0.0, 0.0, screen_width().max(1.0), screen_height().max(1.0));
+        self.draw_view(sim, view, screen);
+    }
+
+    /// Draw the world rectangle `src` over the whole screen (pan and zoom).
+    /// World areas outside the box are left dark and the box is outlined.
+    pub fn draw_view(&mut self, sim: &Sim, view: &View, src: Rect) {
         let (w, h) = (screen_width().max(1.0) as u32, screen_height().max(1.0) as u32);
         clear_background(BACKGROUND);
         self.compute_colors(sim, view);
+        let screen_cam = {
+            let mut cam = Camera2D::from_display_rect(src);
+            // from_display_rect is y-up (meant for render targets).
+            cam.zoom.y = -cam.zoom.y;
+            cam
+        };
 
         // ---- Particles (optionally into the persistent trail image) ----
         if view.trails {
-            if Target::ensure(&mut self.trail, w, h) {
-                set_camera(&self.trail.as_ref().unwrap().camera());
+            // A moved camera would smear the old image: start afresh.
+            let fresh = Target::ensure(&mut self.trail, w, h) || self.trail_src != Some(src);
+            self.trail_src = Some(src);
+            let t = self.trail.as_ref().unwrap();
+            let mut cam = Camera2D::from_display_rect(src);
+            cam.render_target = Some(t.rt.clone());
+            set_camera(&cam);
+            if fresh {
                 clear_background(BACKGROUND);
             }
-            let t = self.trail.as_ref().unwrap();
-            set_camera(&t.camera());
             let fade = Color::new(BACKGROUND.r, BACKGROUND.g, BACKGROUND.b, view.trail_fade.clamp(0.01, 1.0));
-            draw_rectangle(0.0, 0.0, w as f32, h as f32, fade);
+            draw_rectangle(src.x, src.y, src.w, src.h, fade);
             self.draw_dots(sim);
             set_default_camera();
             gl_use_material(&self.opaque_mat);
@@ -293,8 +307,11 @@ impl Renderer {
             gl_use_default_material();
         } else {
             self.trail = None;
+            self.trail_src = None;
+            set_camera(&screen_cam);
             self.draw_dots(sim);
         }
+        set_camera(&screen_cam);
 
         // ---- Overlay ----
         self.overlay.kind = view.overlay;
@@ -305,10 +322,17 @@ impl Renderer {
         // ---- Walls ----
         draw_walls(sim);
         draw_reactor(sim);
+        let world = Rect::new(0.0, 0.0, sim.width, sim.height);
+        if src != world {
+            let k = src.w / w as f32;
+            draw_rectangle_lines(0.0, 0.0, sim.width, sim.height, 1.5 * k, Color::new(0.45, 0.5, 0.65, 0.6));
+        }
+        set_default_camera();
 
         // ---- Element labels ----
         if view.mode == ViewMode::Element && view.labels {
-            self.draw_labels(sim, |p| p, 1.0, None);
+            let k = w as f32 / src.w;
+            self.draw_labels(sim, |p| (p - src.point()) * k, k, None);
         }
     }
 
