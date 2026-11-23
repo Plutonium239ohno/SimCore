@@ -1,11 +1,11 @@
 //! Filter walls, and point-nucleus mode (one particle per nucleus,
 //! neutron interactions from cross-sections).
 use macroquad::math::{Vec2, vec2};
-use particle_sim::game_scenes as scenes;
-use particle_sim::nuclear::{energy_of, game_sim, place_nucleus, set_point_mode, speed_for};
-use particle_sim::reactions::E_THERMAL;
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
+use sim_core::game_scenes as scenes;
+use sim_core::nuclear::{energy_of, game_sim, place_nucleus, set_point_mode, speed_for};
+use sim_core::reactions::E_THERMAL;
+use sim_core::sim::Sim;
+use sim_core::types::ids;
 
 fn census(sim: &Sim) -> Vec<(u32, u32, u32)> {
     let mut c: std::collections::BTreeMap<(u32, u32), u32> = Default::default();
@@ -123,7 +123,7 @@ fn point_moderation_thermalizes() {
         y += 10.4;
         row += 1;
     }
-    particle_sim::thermal::thermalize(&mut sim, 293.0);
+    sim_core::thermal::thermalize(&mut sim, 293.0);
     let v = speed_for(&sim.cfg, 2.0, 1.0);
     for j in 0..60 {
         let a = j as f32 * 0.3;
@@ -155,5 +155,5 @@ fn point_scene_round_trip() {
     assert!(other.point_nuclei);
     assert_eq!(census(&other), before);
     let f = other.walls.segs.last().unwrap();
-    assert_eq!((f.kind, f.filter_z, f.only), (particle_sim::walls::WallKind::Filter, 54, true));
+    assert_eq!((f.kind, f.filter_z, f.only), (sim_core::walls::WallKind::Filter, 54, true));
 }

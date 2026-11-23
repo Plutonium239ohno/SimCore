@@ -1,5 +1,5 @@
 //! Physics sanity checks: settling, overlap, Barnes–Hut accuracy, gas energy.
-use particle_sim::sim::Sim;
+use sim_core::sim::Sim;
 
 fn stats(sim: &Sim) -> (f32, f32, f32) {
     let n = sim.len();

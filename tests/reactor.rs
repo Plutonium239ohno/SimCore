@@ -1,14 +1,14 @@
 //! Control rods, fuel channels, the event history and its export.
 use macroquad::math::{Vec2, vec2};
-use particle_sim::game_scenes as scenes;
-use particle_sim::nuclear::{EventKind, game_config, real_velocity, speed_for};
-use particle_sim::reactions::E_THERMAL;
-use particle_sim::reactor::{Rod, Site};
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
+use sim_core::game_scenes as scenes;
+use sim_core::nuclear::{EventKind, game_config, real_velocity, speed_for};
+use sim_core::reactions::E_THERMAL;
+use sim_core::reactor::{Rod, Site};
+use sim_core::sim::Sim;
+use sim_core::types::ids;
 
 fn game_sim() -> Sim {
-    particle_sim::nuclear::game_sim(1200.0, 800.0)
+    sim_core::nuclear::game_sim(1200.0, 800.0)
 }
 
 fn free_neutrons(sim: &Sim) -> usize {
@@ -57,7 +57,7 @@ fn withdrawn_rods_are_harmless_and_inserted_rods_push_nuclei() {
     for k in 0..10 {
         sim.add(vec2(580.0, 200.0 + k as f32 * 20.0), vec2(v, 0.0), ids::NEUTRON);
     }
-    assert!(particle_sim::nuclear::place_nucleus(&mut sim, vec2(600.0, 650.0), 1, 1, Vec2::ZERO));
+    assert!(sim_core::nuclear::place_nucleus(&mut sim, vec2(600.0, 650.0), 1, 1, Vec2::ZERO));
     sim.index_nuclei();
     for _ in 0..90 {
         sim.step(1.0 / 60.0, None);
@@ -123,7 +123,7 @@ fn fuelling_machine_reloads_spent_channels() {
     sim.reactor.sites.push(Site { pos: at, z: 92, n: 143, empty_for: 0.0 });
     sim.reactor.refuel_delay = 0.5;
     // Spent fuel sits in the channel: U-236 (long-lived, not fissile).
-    assert!(particle_sim::nuclear::place_nucleus(&mut sim, at, 92, 144, Vec2::ZERO));
+    assert!(sim_core::nuclear::place_nucleus(&mut sim, at, 92, 144, Vec2::ZERO));
     sim.index_nuclei();
     for _ in 0..90 {
         sim.step(1.0 / 60.0, None);

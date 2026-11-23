@@ -1,11 +1,11 @@
 use macroquad::math::{vec2, Vec2};
-use particle_sim::game_scenes as scenes;
-use particle_sim::nuclear::place_nucleus;
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
+use sim_core::game_scenes as scenes;
+use sim_core::nuclear::place_nucleus;
+use sim_core::sim::Sim;
+use sim_core::types::ids;
 
 fn game_sim() -> Sim {
-    particle_sim::nuclear::game_sim(1200.0, 800.0)
+    sim_core::nuclear::game_sim(1200.0, 800.0)
 }
 
 #[test]

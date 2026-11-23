@@ -1,8 +1,8 @@
 //! Headless check of nuclear mode.
 use macroquad::math::vec2;
-use particle_sim::nuclear::nuclide_name;
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
+use sim_core::nuclear::nuclide_name;
+use sim_core::sim::Sim;
+use sim_core::types::ids;
 
 fn report(sim: &Sim, label: &str) {
     let mut by_kind = vec![0usize; sim.types.len()];

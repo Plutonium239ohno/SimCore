@@ -1,5 +1,5 @@
-//! Headless benchmark: cargo run --release --bin bench -- [particles] [frames]
-use particle_sim::sim::Sim;
+//! Headless benchmark: cargo run --release --example bench -- [particles] [frames]
+use sim_core::sim::Sim;
 use std::time::Instant;
 
 fn run(label: &str, n: usize, frames: usize, setup: impl Fn(&mut Sim)) {

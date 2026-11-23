@@ -1,7 +1,7 @@
 //! Walls stop fast particles (no tunnelling).
 use macroquad::math::vec2;
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
+use sim_core::sim::Sim;
+use sim_core::types::ids;
 
 #[test]
 fn walls_stop_fast_particles() {

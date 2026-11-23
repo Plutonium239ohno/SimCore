@@ -1,7 +1,7 @@
 //! Headless run of the Nuclear Game presets: what happens in each?
 //! cargo run --release --example game_probe [preset] [seconds]   (TRACE=1 prints every event)
-use particle_sim::game_scenes as scenes;
-use particle_sim::nuclear::nuclide_name;
+use sim_core::game_scenes as scenes;
+use sim_core::nuclear::nuclide_name;
 use std::time::Instant;
 fn main() {
     macroquad::rand::srand(std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(7));
@@ -9,7 +9,7 @@ fn main() {
     let secs: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(20);
     for k in 0..scenes::PRESETS.len() {
         if only.is_some_and(|o| o != k) { continue; }
-        let mut sim = particle_sim::nuclear::game_sim(1600.0, 900.0);
+        let mut sim = sim_core::nuclear::game_sim(1600.0, 900.0);
         scenes::load_preset(&mut sim, k);
         if let Some(f) = std::env::var("ROD").ok().and_then(|s| s.parse::<f32>().ok()) {
             sim.reactor.insertion = f;

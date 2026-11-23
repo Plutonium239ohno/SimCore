@@ -1,8 +1,8 @@
 //! Sandbox species editing: removing any species re-numbers the particles
 //! and the interaction matrix; duplicating copies its rules.
 use macroquad::math::vec2;
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
+use sim_core::sim::Sim;
+use sim_core::types::ids;
 
 fn customs(sim: &Sim) -> Vec<u8> {
     (0..sim.types.len() as u8).filter(|&k| sim.types[k as usize].custom).collect()

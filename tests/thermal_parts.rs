@@ -1,13 +1,13 @@
 //! Wall kinds, heat transfer, freeze plugs, spawners, drains and pumps.
 use macroquad::math::{Rect, Vec2, vec2};
-use particle_sim::game_scenes as scenes;
-use particle_sim::nuclear::{game_sim, place_nucleus, speed_for};
-use particle_sim::reactions::E_THERMAL;
-use particle_sim::reactor::{Drain, DrainFilter, Pump, Spawner};
-use particle_sim::sim::Sim;
-use particle_sim::thermal::{region_theta, thermalize};
-use particle_sim::types::ids;
-use particle_sim::walls::WallKind;
+use sim_core::game_scenes as scenes;
+use sim_core::nuclear::{game_sim, place_nucleus, speed_for};
+use sim_core::reactions::E_THERMAL;
+use sim_core::reactor::{Drain, DrainFilter, Pump, Spawner};
+use sim_core::sim::Sim;
+use sim_core::thermal::{region_theta, thermalize};
+use sim_core::types::ids;
+use sim_core::walls::WallKind;
 
 fn world() -> Sim {
     let mut sim = game_sim(1000.0, 700.0);

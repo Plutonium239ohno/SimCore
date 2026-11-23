@@ -1,5 +1,6 @@
 [package]
-name = "particle-sim"
+name = "sim-core"
+description = "Shared physics core for ParticleSim and NuclearSim: 2D particle solver, walls, nuclear physics, renderer and panel GUI."
 version = "0.1.0"
 edition = "2024"
 

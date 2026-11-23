@@ -1,6 +1,6 @@
 use macroquad::math::vec2;
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
+use sim_core::sim::Sim;
+use sim_core::types::ids;
 
 #[test]
 fn add_and_remove_species_while_running() {
@@ -82,7 +82,7 @@ fn nuclei_do_not_self_heat() {
 /// U-235 + slow n fissions.
 #[test]
 fn reactions_in_the_engine() {
-    use particle_sim::nuclear::place_nucleus;
+    use sim_core::nuclear::place_nucleus;
     let setup = || {
         let mut sim = Sim::new(600.0, 400.0);
         sim.cfg.nuclear = true;

@@ -1,11 +1,11 @@
 //! Per-wall settings: thickness, neutron reflection, filter rules (charge,
 //! energy, mass number), and heat not leaking through walls.
 use macroquad::math::vec2;
-use particle_sim::game_scenes as scenes;
-use particle_sim::nuclear::{energy_of, game_sim, place_nucleus, speed_for};
-use particle_sim::sim::Sim;
-use particle_sim::types::ids;
-use particle_sim::walls::{FilterRule, WallKind, WallSpec};
+use sim_core::game_scenes as scenes;
+use sim_core::nuclear::{energy_of, game_sim, place_nucleus, speed_for};
+use sim_core::sim::Sim;
+use sim_core::types::ids;
+use sim_core::walls::{FilterRule, WallKind, WallSpec};
 
 fn run(sim: &mut Sim, frames: usize) {
     sim.index_nuclei();

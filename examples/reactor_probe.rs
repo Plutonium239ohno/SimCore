@@ -3,9 +3,9 @@
 //! cargo run --release --example reactor_probe [insertion] [seconds]
 //! env: PRESET=n (default 3), POINTS (point nuclei), NOREFUEL, NOSOURCE, NOHELIUM, MELT=<K>,
 //! SEED, SPLIT_X=<x> (+DUMP) for where free neutrons are, UEVENTS
-use particle_sim::game_scenes as scenes;
-use particle_sim::nuclear::EventKind;
-use particle_sim::types::ids;
+use sim_core::game_scenes as scenes;
+use sim_core::nuclear::EventKind;
+use sim_core::types::ids;
 use std::collections::BTreeMap;
 
 fn main() {
@@ -13,7 +13,7 @@ fn main() {
     let rod: f32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let secs: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let preset: usize = std::env::var("PRESET").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
-    let mut sim = particle_sim::nuclear::game_sim(1600.0, 900.0);
+    let mut sim = sim_core::nuclear::game_sim(1600.0, 900.0);
     sim.point_nuclei = std::env::var("POINTS").is_ok();
     scenes::load_preset(&mut sim, preset);
     if let Some(v) = std::env::var("XS").ok().and_then(|s| s.parse().ok()) {
@@ -47,13 +47,13 @@ fn main() {
         if f % 300 == 299 {
             let s = sim.reactor.samples.back().copied().unwrap_or_default();
             for (k, d) in sim.reactor.drains.iter().enumerate() {
-                println!("    drain {k} {:?}: removed {} rate {:.1}/s speed {:.0} px/s E/u {}", d.filter, d.removed, d.rate, d.speed, particle_sim::nuclear::format_energy(d.energy));
+                println!("    drain {k} {:?}: removed {} rate {:.1}/s speed {:.0} px/s E/u {}", d.filter, d.removed, d.rate, d.speed, sim_core::nuclear::format_energy(d.energy));
             }
             if let Ok(xs) = std::env::var("SPLIT_X") {
                 let x: f32 = xs.parse().unwrap_or(1000.0);
                 let fr: Vec<(f32, f32, f64)> = (0..sim.len())
                     .filter(|&i| sim.kind[i] == ids::NEUTRON && !(0..sim.len()).any(|j| j != i && sim.tag[j] == sim.tag[i] && sim.is_nuclear(j)))
-                    .map(|i| (sim.pos[i].x, sim.pos[i].y, particle_sim::nuclear::energy_of(&sim.cfg, sim.vel[i].length(), 1.0)))
+                    .map(|i| (sim.pos[i].x, sim.pos[i].y, sim_core::nuclear::energy_of(&sim.cfg, sim.vel[i].length(), 1.0)))
                     .collect();
                 let inside = fr.iter().filter(|p| p.0 < x).count();
                 let mut e: Vec<f64> = fr.iter().map(|p| p.2).collect();
@@ -81,20 +81,20 @@ fn main() {
                 }
                 if false {
                     for p in fr.iter().take(12) {
-                        println!("      n at ({:.0},{:.0}) E {}", p.0, p.1, particle_sim::nuclear::format_energy(p.2));
+                        println!("      n at ({:.0},{:.0}) E {}", p.0, p.1, sim_core::nuclear::format_energy(p.2));
                     }
                 }
-                println!("    free n: {} in core leg, {} elsewhere; median E {}", inside, fr.len() - inside, e.get(e.len() / 2).map(|&v| particle_sim::nuclear::format_energy(v)).unwrap_or_default());
+                println!("    free n: {} in core leg, {} elsewhere; median E {}", inside, fr.len() - inside, e.get(e.len() / 2).map(|&v| sim_core::nuclear::format_energy(v)).unwrap_or_default());
             }
             for sp in &sim.reactor.spawners {
                 println!("    spawner {}-{} rate {} spawned {} acc {:.2}", sp.z, sp.n, sp.rate, sp.spawned, sp.acc);
             }
-            for w in sim.walls.segs.iter().filter(|w| w.kind == particle_sim::walls::WallKind::FreezePlug) {
+            for w in sim.walls.segs.iter().filter(|w| w.kind == sim_core::walls::WallKind::FreezePlug) {
                 println!("    plug theta {:.0}", w.theta);
             }
             let hot = sim.walls.segs.iter().filter(|s| s.kind.conducts()).map(|s| s.theta).fold(0.0f32, f32::max);
-            let mat = particle_sim::thermal::region_theta(&sim, |_| true).unwrap_or(0.0);
-            println!("    hottest wall {}  matter {}  walls {}", particle_sim::thermal::format_kelvin(particle_sim::thermal::kelvin_of(&sim.cfg, hot)), particle_sim::thermal::format_kelvin(particle_sim::thermal::kelvin_of(&sim.cfg, mat)), sim.walls.segs.len());
+            let mat = sim_core::thermal::region_theta(&sim, |_| true).unwrap_or(0.0);
+            println!("    hottest wall {}  matter {}  walls {}", sim_core::thermal::format_kelvin(sim_core::thermal::kelvin_of(&sim.cfg, hot)), sim_core::thermal::format_kelvin(sim_core::thermal::kelvin_of(&sim.cfg, mat)), sim.walls.segs.len());
             println!(
                 "t={:>3}s free-n {:>4}  fissions {:>4}  power {:>5.1}/s  particles {}",
                 (f + 1) / 60,
@@ -108,11 +108,11 @@ fn main() {
     {
         let mut es: Vec<f64> = (0..sim.len())
             .filter(|&i| sim.kind[i] == ids::NEUTRON && !(0..sim.len()).any(|j| j != i && sim.tag[j] == sim.tag[i] && sim.kind[j] <= 1))
-            .map(|i| particle_sim::nuclear::energy_of(&sim.cfg, sim.vel[i].length(), 1.0))
+            .map(|i| sim_core::nuclear::energy_of(&sim.cfg, sim.vel[i].length(), 1.0))
             .collect();
         es.sort_by(f64::total_cmp);
         if !es.is_empty() {
-            let q = |f: f64| particle_sim::nuclear::format_energy(es[((es.len() - 1) as f64 * f) as usize]);
+            let q = |f: f64| sim_core::nuclear::format_energy(es[((es.len() - 1) as f64 * f) as usize]);
             println!("free-n energy: 10% {}  25% {}  median {}  75% {}  90% {}  (n={})", q(0.1), q(0.25), q(0.5), q(0.75), q(0.9), es.len());
         }
     }
