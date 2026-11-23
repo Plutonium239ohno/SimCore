@@ -331,6 +331,8 @@ pub struct NuclearState {
     /// like reaction products; a nucleus merely shoved fast by a collision
     /// does not).
     pub beam: HashSet<u32>,
+    /// Products of fragmentation (they may fragment more: spallation showers).
+    pub hot: HashSet<u32>,
     /// Fast charged nuclei at the start of this frame: (tag, centre,
     /// velocity, radius). Their whole path through the frame is checked for
     /// contacts: a fast ion that hit something mid-frame has bounced away
@@ -819,9 +821,10 @@ pub fn process(sim: &mut Sim, dt: f32) {
     }
 
     st.sweep_vel.clear();
-    if st.beam.len() > 20_000 {
+    if st.beam.len() + st.hot.len() > 20_000 {
         let alive: HashSet<u32> = sim.tag.iter().copied().collect();
         st.beam.retain(|t| alive.contains(t));
+        st.hot.retain(|t| alive.contains(t));
     }
 
     // ---- 5. Apply ----
@@ -907,7 +910,15 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
     let parents = [(comps[a].tag, crate::sim::pack_zn(za, na)), (comps[b].tag, crate::sim::pack_zn(zb, nb))];
     // Fast collisions shatter the nuclei instead of fusing them.
     let e_lab = e / mu as f64;
-    if za + zb > 0 && chance(fragmentation_chance(e_lab)) && fragment(sim, st, fr, comps, a, b, e) {
+    // Only genuinely fast particles shatter nuclei: beam nuclei and the debris
+    // of earlier fragmentation. (In nucleon-cluster mode a light particle
+    // shoved by a fission fragment gets far too much energy in the sim's
+    // compressed units; it shouldn't set off showers.)
+    let genuine = |t: u32| st.beam.contains(&t) || st.hot.contains(&t);
+    if za + zb > 0 && (genuine(comps[a].tag) || genuine(comps[b].tag)) && chance(fragmentation_chance(e_lab)) && fragment(sim, st, fr, comps, a, b, e) {
+        for &(t, _) in &fr.new_grace[from..] {
+            st.hot.insert(t);
+        }
         st.link(fr, from, parents, true);
         return true;
     }
@@ -1545,6 +1556,17 @@ fn decay(
 /// disc centred on `at` (protons spread evenly through it). Returns false
 /// (adding nothing) if the space is occupied.
 pub fn place_nucleus(sim: &mut Sim, at: Vec2, z: u32, n: u32, vel: Vec2) -> bool {
+    let ok = place_nucleus_inner(sim, at, z, n, vel);
+    // Launched fast (over 1 MeV per nucleon): a genuine fast particle, like
+    // a beam's (see `NuclearState::beam`).
+    if ok && energy_of(&sim.cfg, vel.length(), 1.0) > 1.0 {
+        let t = sim.next_tag;
+        sim.nuclear.beam.insert(t);
+    }
+    ok
+}
+
+fn place_nucleus_inner(sim: &mut Sim, at: Vec2, z: u32, n: u32, vel: Vec2) -> bool {
     let a = (z + n) as usize;
     if a == 0 {
         return false;

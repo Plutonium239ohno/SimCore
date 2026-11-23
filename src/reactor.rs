@@ -603,13 +603,20 @@ impl Reactor {
 /// rods are vertical, so moderator is moved aside rather than ploughed down.
 #[inline]
 pub fn push_out(rects: &[Rect], p: Vec2, r: f32) -> Vec2 {
+    push_out_toward(rects, p, r, p.x)
+}
+
+/// `push_out`, choosing the side by `side_x` (a nucleus's centre, so all
+/// its nucleons go the same way instead of straddling the rod).
+#[inline]
+pub fn push_out_toward(rects: &[Rect], p: Vec2, r: f32, side_x: f32) -> Vec2 {
     let mut q = p;
     for rc in rects {
         if q.y + r <= rc.y || q.y - r >= rc.y + rc.h || q.x + r <= rc.x || q.x - r >= rc.x + rc.w {
             continue;
         }
         let mid = rc.x + rc.w * 0.5;
-        q.x = if q.x < mid { rc.x - r } else { rc.x + rc.w + r };
+        q.x = if side_x < mid { rc.x - r } else { rc.x + rc.w + r };
     }
     q
 }

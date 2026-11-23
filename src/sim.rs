@@ -251,6 +251,8 @@ pub struct Sim {
     prev_pos: Vec<Vec2>,
     pred_pos: Vec<Vec2>,
     vel_pre: Vec<Vec2>,
+    /// Velocity after this substep's forces (before contacts and walls).
+    vel_int: Vec<Vec2>,
     near: Vec<Vec2>,
     buf_pos: Vec<Vec2>,
     buf_vel: Vec<Vec2>,
@@ -314,6 +316,7 @@ impl Sim {
             prev_pos: Vec::new(),
             pred_pos: Vec::new(),
             vel_pre: Vec::new(),
+            vel_int: Vec::new(),
             near: Vec::new(),
             buf_pos: Vec::new(),
             buf_vel: Vec::new(),
@@ -1108,15 +1111,18 @@ impl Sim {
 
         self.buf_pos.resize(pos.len(), Vec2::ZERO);
         self.vel_pre.resize(pos.len(), Vec2::ZERO);
+        self.vel_int.resize(pos.len(), Vec2::ZERO);
         self.buf_pos
             .par_iter_mut()
             .zip(self.vel_pre.par_iter_mut())
+            .zip(self.vel_int.par_iter_mut())
             .enumerate()
-            .for_each(|(i, (np, nv))| {
+            .for_each(|(i, ((np, nv), vi))| {
                 let p = pos[i];
                 if t.ghost[kind[i] as usize] {
                     // Photons/neutrinos: straight lines, no forces.
                     *nv = vel[i];
+                    *vi = vel[i];
                     *np = p + vel[i] * h;
                     return;
                 }
@@ -1128,7 +1134,15 @@ impl Sim {
                         a += d * (m.strength * (1.0 - dist / m.radius) / dist);
                     }
                 }
-                let mut v = (vel[i] + a * h) * damp;
+                // Internal damping calms motion *within* a nucleus (relative to
+                // its mean velocity) before this substep's forces act, so
+                // forces on the whole nucleus - fields, Coulomb, the mouse - act
+                // in full (a one-particle nucleus has nothing to damp).
+                let v0 = match nuc_vel.get(nuc[i] as usize) {
+                    Some(&vm) => vm + (vel[i] - vm) * int_damp,
+                    None => vel[i],
+                };
+                let mut v = (v0 + a * h) * damp;
                 if !fields.is_empty() {
                     let k = nuc[i] as usize;
                     let (qm, at) = match (nuc_z.get(k), nuc_mass.get(k)) {
@@ -1140,14 +1154,12 @@ impl Sim {
                     };
                     v = crate::field::apply(fields, at, v, qm, h);
                 }
-                let mut v = clamp_speed(v, vmax);
-                if let Some(&vm) = nuc_vel.get(nuc[i] as usize) {
-                    v = vm + (v - vm) * int_damp;
-                }
+                let v = clamp_speed(v, vmax);
                 // Restitution judges impacts by the velocity *before* this
                 // substep's forces: contacts merely pressed together by a force
                 // (gravity, strong force, Coulomb) must not "bounce".
                 *nv = vel[i];
+                *vi = v;
                 *np = p + v * h;
             });
 
@@ -1287,7 +1299,9 @@ impl Sim {
 
                 let mut q = walls.resolve(p, prev[i], ri, hit(i));
                 if !rods.is_empty() && rod_solid(kind[i], i_multi) {
-                    q = crate::reactor::push_out(rods, q, ri);
+                    // A nucleus goes to the side its centre is on.
+                    let side = if i_multi { self.nuc_center.get(nuc[i] as usize).map_or(q.x, |c| c.x) } else { q.x };
+                    q = crate::reactor::push_out_toward(rods, q, ri, side);
                 }
                 if !wrap {
                     if !wrap {
@@ -1343,29 +1357,37 @@ impl Sim {
         // is the restitution pass's job, and a wall drawn through a nucleus
         // must shove it aside, not fire its nucleons off.
         if self.cfg.nuclear && !self.nuc_count.is_empty() {
-            let (kind, walls, nuc, nuc_count, hits) = (&self.kind, &self.walls, &self.nuc, &self.nuc_count, &self.hits);
-            self.pos.par_iter_mut().zip(self.prev_pos.par_iter_mut()).enumerate().for_each(|(i, (p, pv))| {
+            let (kind, walls, nuc, nuc_count, hits, centre) = (&self.kind, &self.walls, &self.nuc, &self.nuc_count, &self.hits, &self.nuc_center);
+            self.pos.par_iter_mut().zip(self.prev_pos.par_iter_mut()).zip(self.pred_pos.par_iter_mut()).enumerate().for_each(|(i, ((p, pv), pr))| {
                 if nuc_count.get(nuc[i] as usize).is_some_and(|&c| c > 1) {
                     let ri = t.radius[kind[i] as usize];
                     let mut q = walls.resolve(*p, *pv, ri, hits[i]);
                     if !rods.is_empty() {
-                        q = crate::reactor::push_out(rods, q, ri);
+                        let side = centre.get(nuc[i] as usize).map_or(q.x, |c| c.x);
+                        q = crate::reactor::push_out_toward(rods, q, ri, side);
                     }
                     q.x = q.x.clamp(ri, (w - ri).max(ri));
                     q.y = q.y.clamp(ri, (hgt - ri).max(ri));
                     *pv += q - *p;
+                    *pr += q - *p; // (not velocity either: see below)
                     *p = q;
                 }
             });
         }
 
+        // Velocity = what the forces gave plus whatever the contacts and
+        // walls moved it by. (Re-deriving it from the whole displacement,
+        // (pos - prev) / h, loses f32 precision at large coordinates and
+        // adds a random kick every substep - worse the more substeps per
+        // second, so fields and orbits drifted with the frame rate.)
         let inv_h = 1.0 / h;
         let vmax = self.cfg.max_speed;
-        let (pos, prev, kind) = (&self.pos, &self.prev_pos, &self.kind);
+        let (pos, pred, kind, vint) = (&self.pos, &self.pred_pos, &self.kind, &self.vel_int);
         self.vel.resize(pos.len(), Vec2::ZERO);
         self.vel.par_iter_mut().enumerate().for_each(|(i, v)| {
             if !t.ghost[kind[i] as usize] {
-                *v = clamp_speed((pos[i] - prev[i]) * inv_h, vmax);
+                let moved = pos[i] - pred[i];
+                *v = clamp_speed(if moved == Vec2::ZERO { vint[i] } else { vint[i] + moved * inv_h }, vmax);
             }
         });
     }
