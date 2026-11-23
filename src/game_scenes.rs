@@ -2,14 +2,14 @@
 //! (Library code so the headless probes and tests can use them too.)
 
 use macroquad::math::{Vec2, vec2};
-use macroquad::rand::gen_range;
+use crate::rng::gen_range;
 use crate::nuclear::{place_nucleus, speed_for};
 use crate::reactor::{Drain, DrainFilter, Pump, Rod, Site, Spawner};
 use crate::walls::WallKind;
 use macroquad::math::Rect;
 use crate::sim::Sim;
 use crate::types::{ParticleType, ids};
-use std::collections::HashMap;
+use crate::rng::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -132,9 +132,16 @@ pub fn save(sim: &Sim, name: &str) -> Result<PathBuf, String> {
     let dir = scene_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{}.scene", safe_name(name)));
+    std::fs::write(&path, to_text(sim)).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// The whole scene as text (the scene-file format; also used for undo).
+pub fn to_text(sim: &Sim) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "nuclear-game-scene 2");
     let _ = writeln!(s, "size {} {}", sim.width, sim.height);
+    let _ = writeln!(s, "seed {} {}", sim.seed, sim.step_count);
     macro_rules! put {
         ($f:ident, $t:ty) => {
             let _ = writeln!(s, "cfg {} {}", stringify!($f), sim.cfg.$f);
@@ -196,13 +203,17 @@ pub fn save(sim: &Sim, name: &str) -> Result<PathBuf, String> {
         }
         let _ = writeln!(s);
     }
-    std::fs::write(&path, s).map_err(|e| e.to_string())?;
-    Ok(path)
+    s
 }
 
 pub fn load(sim: &mut Sim, name: &str) -> Result<(), String> {
     let path = scene_dir().join(format!("{}.scene", safe_name(name)));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    from_text(sim, &text)
+}
+
+/// Replace the scene with one saved by `to_text`.
+pub fn from_text(sim: &mut Sim, text: &str) -> Result<(), String> {
     let mut lines = text.lines();
     let Some(version) = lines.next().and_then(|l| l.strip_prefix("nuclear-game-scene")).map(|v| v.trim().parse::<u32>().unwrap_or(1)) else {
         return Err("not a scene file".into());
@@ -218,7 +229,7 @@ pub fn load(sim: &mut Sim, name: &str) -> Result<(), String> {
     sim.reactor.clear();
     sim.point_nuclei = false;
     let mut scale = 1.0f32;
-    let mut tags: HashMap<u32, u32> = HashMap::new();
+    let mut tags: HashMap<u32, u32> = HashMap::default();
     for line in lines {
         let f: Vec<&str> = line.split_whitespace().collect();
         let num = |k: usize| f.get(k).and_then(|x| x.parse::<f32>().ok()).unwrap_or(0.0);
@@ -244,6 +255,10 @@ pub fn load(sim: &mut Sim, name: &str) -> Result<(), String> {
                 cfg_fields!(get);
             }
             Some("wallhalf") => sim.walls.half = num(1),
+            Some("seed") => {
+                sim.seed = f.get(1).and_then(|x| x.parse().ok()).unwrap_or(1);
+                sim.step_count = f.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
+            }
             Some("points") => sim.point_nuclei = num(1) != 0.0,
             Some("reactor") => {
                 let re = &mut sim.reactor;
@@ -328,7 +343,7 @@ pub fn load(sim: &mut Sim, name: &str) -> Result<(), String> {
     if old_scale {
         // Shrink each nucleus about its centre by the size change.
         let k = sim.types[ids::NEUTRON as usize].radius / 4.0;
-        let mut centre: HashMap<u32, (Vec2, u32)> = HashMap::new();
+        let mut centre: HashMap<u32, (Vec2, u32)> = HashMap::default();
         for i in 0..sim.len() {
             if ParticleType::is_nucleon(sim.kind[i]) {
                 let e = centre.entry(sim.tag[i]).or_insert((Vec2::ZERO, 0));
@@ -418,6 +433,10 @@ fn fresh(sim: &mut Sim) {
 }
 
 pub fn load_preset(sim: &mut Sim, which: usize) {
+    // Built from the scene's seed: the same seed gives the same layout (and,
+    // stepped the same way, the same run).
+    crate::rng::seed(sim.seed);
+    sim.step_count = 0;
     // Scenes are laid out with nucleon clusters, then converted.
     let points = sim.point_nuclei;
     sim.point_nuclei = false;

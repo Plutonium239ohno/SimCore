@@ -3,6 +3,7 @@
 //! forces, interaction rules and walls; nuclear physics (nuclide data,
 //! reactions, point nuclei, reactor parts, heat); the renderer; and the
 //! immediate-mode panel GUI and magnifier both apps use.
+pub mod rng;
 pub mod grid;
 pub mod sim;
 pub mod types;

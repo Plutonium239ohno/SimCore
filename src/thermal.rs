@@ -21,8 +21,8 @@ use crate::sim::Sim;
 use crate::types::ids;
 use crate::walls::WallKind;
 use macroquad::math::{Vec2, vec2};
-use macroquad::rand::gen_range;
-use std::collections::{HashMap, HashSet};
+use crate::rng::gen_range;
+use crate::rng::{HashMap, HashSet};
 
 const K_B: f64 = 8.617e-11; // MeV/K
 
@@ -223,7 +223,7 @@ pub fn apply(sim: &mut Sim, dt: f32) {
         // Deposit the stopping heat in the atoms around each fast ion.
         if !heat.is_empty() {
             let cell = 16.0 * r_n;
-            let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+            let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::default();
             for (k, x) in b.iter().enumerate() {
                 if x.a > 0 && !(x.z == 0 && x.a == 1) {
                     grid.entry(((x.com.x / cell) as i32, (x.com.y / cell) as i32)).or_default().push(k);
@@ -279,7 +279,7 @@ pub fn apply(sim: &mut Sim, dt: f32) {
         // motion relative to it, so a pumped stream turning at a wall isn't
         // read as hot.
         let cell = 40.0;
-        let mut flow: HashMap<(i32, i32), (Vec2, f32)> = HashMap::new();
+        let mut flow: HashMap<(i32, i32), (Vec2, f32)> = HashMap::default();
         for (k, x) in b.iter().enumerate() {
             if x.a > 1 || x.z > 0 {
                 let e = flow.entry(((x.com.x / cell) as i32, (x.com.y / cell) as i32)).or_insert((Vec2::ZERO, 0.0));
@@ -287,7 +287,7 @@ pub fn apply(sim: &mut Sim, dt: f32) {
                 e.1 += x.mass;
             }
         }
-        let mut touching: HashSet<(u32, u32)> = HashSet::new();
+        let mut touching: HashSet<(u32, u32)> = HashSet::default();
         let cont = 1.0 - (-CONTACT_RATE * dt).exp();
         for (k, x) in b.iter().enumerate() {
             // Fast ions being stopped give their energy to the matter (see
@@ -414,7 +414,7 @@ pub fn apply(sim: &mut Sim, dt: f32) {
 
 /// Temperature (sim units) of the matter in a region: mean KE per body.
 pub fn region_theta(sim: &Sim, inside: impl Fn(Vec2) -> bool) -> Option<f32> {
-    let mut bodies: HashMap<u32, (Vec2, Vec2, f32, u32, bool)> = HashMap::new();
+    let mut bodies: HashMap<u32, (Vec2, Vec2, f32, u32, bool)> = HashMap::default();
     for (tag, b) in sim.bodies() {
         bodies.insert(tag, (b.pos * b.parts as f32, b.vel * b.parts as f32, b.a() as f32, b.parts.max(1), b.z > 0 || b.a() > 1));
     }
@@ -433,7 +433,7 @@ pub fn region_theta(sim: &Sim, inside: impl Fn(Vec2) -> bool) -> Option<f32> {
         return None;
     }
     let cell = 40.0;
-    let mut flow: HashMap<(i32, i32), (Vec2, f32)> = HashMap::new();
+    let mut flow: HashMap<(i32, i32), (Vec2, f32)> = HashMap::default();
     for (p, v, m) in &list {
         let e = flow.entry(((p.x / cell) as i32, (p.y / cell) as i32)).or_insert((Vec2::ZERO, 0.0));
         e.0 += *v * *m;
@@ -455,8 +455,8 @@ pub fn region_theta(sim: &Sim, inside: impl Fn(Vec2) -> bool) -> Option<f32> {
 /// theta per body (equipartition).
 pub fn thermalize(sim: &mut Sim, t_kelvin: f32) {
     let theta = theta_of(&sim.cfg, t_kelvin);
-    let mut kick: HashMap<u32, Vec2> = HashMap::new();
-    let mut mass: HashMap<u32, (f32, u32, bool)> = HashMap::new();
+    let mut kick: HashMap<u32, Vec2> = HashMap::default();
+    let mut mass: HashMap<u32, (f32, u32, bool)> = HashMap::default();
     for (tag, b) in sim.bodies() {
         mass.insert(tag, (b.a() as f32, b.a(), b.z > 0));
     }

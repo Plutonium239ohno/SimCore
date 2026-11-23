@@ -4,7 +4,7 @@ use crate::nuclear::NuclearState;
 use crate::types::{ParticleType, RuleMatrix, default_types, ids};
 use crate::walls::Walls;
 use macroquad::math::{Vec2, vec2};
-use macroquad::rand::gen_range;
+use crate::rng::gen_range;
 use rayon::prelude::*;
 
 /// Every force/feature is toggleable and tunable from here.
@@ -206,7 +206,11 @@ pub struct Sim {
     /// interactions are rolled from cross-sections.
     pub point_nuclei: bool,
     pub(crate) next_tag: u32,
-    step_count: u32,
+    /// Steps taken (with `seed`, decides every random draw of the next step).
+    pub step_count: u64,
+    /// Random seed of this scene: the same scene, stepped the same way,
+    /// plays out identically (see rng.rs).
+    pub seed: u64,
     /// Index of the particle's nucleus (u32::MAX: none / not yet indexed),
     /// rebuilt by nuclear.rs every frame; used for the roundness force.
     pub nuc: Vec<u32>,
@@ -281,6 +285,7 @@ impl Sim {
             point_nuclei: false,
             next_tag: 0,
             step_count: 0,
+            seed: 1,
             nuc: Vec::new(),
             n_nuclei: 0,
             nuc_center: Vec::new(),
@@ -410,8 +415,8 @@ impl Sim {
     }
 
     /// Every nucleus by tag: centre, velocity, Z, N and member count.
-    pub fn bodies(&self) -> std::collections::HashMap<u32, BodyInfo> {
-        let mut m: std::collections::HashMap<u32, BodyInfo> = std::collections::HashMap::with_capacity(self.n_nuclei + 8);
+    pub fn bodies(&self) -> crate::rng::HashMap<u32, BodyInfo> {
+        let mut m: crate::rng::HashMap<u32, BodyInfo> = crate::rng::HashMap::with_capacity_and_hasher(self.n_nuclei + 8, Default::default());
         for i in 0..self.len() {
             if !self.is_nuclear(i) {
                 continue;
@@ -433,7 +438,7 @@ impl Sim {
 
     /// Group nucleons into nuclei by tag (for the roundness force).
     pub fn index_nuclei(&mut self) {
-        let mut map: std::collections::HashMap<u32, u32> = std::collections::HashMap::with_capacity(self.len() / 4);
+        let mut map: crate::rng::HashMap<u32, u32> = crate::rng::HashMap::with_capacity_and_hasher(self.len() / 4, Default::default());
         for i in 0..self.len() {
             self.nuc[i] = if self.is_nuclear(i) {
                 let next = map.len() as u32;
@@ -644,10 +649,10 @@ impl Sim {
     /// (overlaps would be resolved violently and look like explosions).
     /// Returns how many were placed; fewer if the box is too full.
     pub fn spawn_random(&mut self, count: usize) -> usize {
-        use std::collections::HashMap;
+        use crate::rng::HashMap;
         let cell = self.max_radius() * 2.0;
         let key = |p: Vec2| ((p.x / cell) as i32, (p.y / cell) as i32);
-        let mut occ: HashMap<(i32, i32), Vec<(Vec2, f32)>> = HashMap::new();
+        let mut occ: HashMap<(i32, i32), Vec<(Vec2, f32)>> = HashMap::default();
         for (p, k) in self.pos.iter().zip(&self.kind) {
             occ.entry(key(*p)).or_default().push((*p, self.types[*k as usize].radius));
         }
@@ -740,6 +745,8 @@ impl Sim {
 
     /// Advance the simulation by `dt` seconds.
     pub fn step(&mut self, dt: f32, mouse: Option<MouseForce>) {
+        self.step_count = self.step_count.wrapping_add(1);
+        crate::rng::seed(self.seed ^ crate::rng::mix(self.step_count));
         if self.pos.is_empty() {
             // Nothing to move, but spawners and sources may add something.
             if self.cfg.nuclear && !self.reactor.is_empty() {
@@ -748,7 +755,6 @@ impl Sim {
             return;
         }
         let t0 = std::time::Instant::now();
-        self.step_count = self.step_count.wrapping_add(1);
         let t = self.table();
         // Cells slightly larger than the biggest particle diameter, so contacts
         // created by one substep of motion are still found in the 3x3 block.
@@ -805,7 +811,6 @@ impl Sim {
             self.compute_short(&t, false, true, &mut near);
             self.near = near;
             lap(1, &mut self.timings);
-            self.step_count = self.step_count.wrapping_add(7919);
             self.integrate(&t, h, mouse);
             lap(2, &mut self.timings);
             self.solve_positions(&t, h);

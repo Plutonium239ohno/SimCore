@@ -1,5 +1,5 @@
 use macroquad::color::Color;
-use macroquad::rand::gen_range;
+use crate::rng::gen_range;
 
 /// Fixed indices of the built-in particles. Custom species start at FIRST_CUSTOM.
 pub mod ids {

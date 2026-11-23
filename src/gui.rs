@@ -6,7 +6,7 @@
 //! makes whole rows clickable, scrolls with the wheel, and clips properly.
 
 use macroquad::prelude::*;
-use std::collections::HashMap;
+use crate::rng::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub use crate::skin::FONT_BYTES;
@@ -116,7 +116,7 @@ impl Gui {
             w: 0.0,
             clip: Rect::new(0.0, 0.0, 0.0, 0.0),
             scope: 0,
-            scrolls: HashMap::new(),
+            scrolls: HashMap::default(),
             scroll_stack: Vec::new(),
             tooltip: None,
             char_buf: Vec::new(),

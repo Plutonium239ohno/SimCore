@@ -6,8 +6,8 @@ use sim_core::types::ids;
 use macroquad::math::{vec2, Vec2};
 
 fn main() {
-    macroquad::rand::srand(3);
     let mut sim = sim_core::nuclear::game_sim(1600.0, 900.0);
+    sim.seed = 3;
     sim.point_nuclei = std::env::var("POINTS").is_ok();
     let z: u32 = std::env::var("Z").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
     let n: u32 = std::env::var("N").ok().and_then(|s| s.parse().ok()).unwrap_or(1);

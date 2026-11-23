@@ -12,7 +12,7 @@
 //!   Li-6+n -> T+alpha, Li-7+p -> 2 alpha, U-235+n -> fission...
 
 use crate::nucdata::{self, mass_excess, separation};
-use macroquad::rand::gen_range;
+use crate::rng::gen_range;
 
 /// e^2 / (4 pi eps0) in MeV fm.
 const E2: f64 = 1.44;
@@ -384,8 +384,8 @@ mod tests {
     use super::*;
 
     /// Outcome counts of `trials` reactions a + b at energy e.
-    fn outcomes(za: u32, na: u32, zb: u32, nb: u32, e: f64, trials: usize) -> std::collections::HashMap<String, usize> {
-        let mut m = std::collections::HashMap::new();
+    fn outcomes(za: u32, na: u32, zb: u32, nb: u32, e: f64, trials: usize) -> crate::rng::HashMap<String, usize> {
+        let mut m = crate::rng::HashMap::default();
         for _ in 0..trials {
             let (z, n) = (za + zb, na + nb);
             let steps = compound_decay(z, n, capture_q(za, na, zb, nb) + e);

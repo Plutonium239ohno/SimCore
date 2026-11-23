@@ -6,7 +6,7 @@ use macroquad::prelude::*;
 use crate::nucdata::nuclide_name;
 use crate::sim::Sim;
 use crate::types::{hsv, ids};
-use std::collections::HashMap;
+use crate::rng::HashMap;
 
 pub const BACKGROUND: Color = Color::new(8.0 / 255.0, 8.0 / 255.0, 13.0 / 255.0, 1.0);
 
@@ -199,7 +199,7 @@ impl Renderer {
             opaque_mat: material(OPAQUE_FRAG, None, vec![]),
             trail: None,
             colors: Vec::new(),
-            nuclei: HashMap::new(),
+            nuclei: HashMap::default(),
         }
     }
 

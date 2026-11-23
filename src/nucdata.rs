@@ -2,7 +2,7 @@
 //! ground state (NUBASE2020, ~3500 nuclides), with a liquid-drop fallback
 //! for nuclei nobody has measured.
 
-use std::collections::HashMap;
+use crate::rng::HashMap;
 use std::sync::OnceLock;
 
 const RAW: &str = include_str!("../data/nuclides.tsv");

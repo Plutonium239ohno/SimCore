@@ -18,9 +18,9 @@ fn free_neutrons(sim: &Sim) -> usize {
 /// Boron carbide is black to slow neutrons but nearly transparent to MeV ones.
 #[test]
 fn rods_absorb_slow_neutrons_not_fast_ones() {
-    macroquad::rand::srand(3);
     for (mev, expect_absorbed) in [(E_THERMAL, true), (2.0, false)] {
         let mut sim = game_sim();
+        sim.seed = 3;
         // A wide slab so every neutron crosses ~40 px of absorber.
         sim.reactor.rods.push(Rod { x: 600.0, top: 50.0, len: 700.0, half_w: 20.0 });
         sim.reactor.insertion = 1.0;

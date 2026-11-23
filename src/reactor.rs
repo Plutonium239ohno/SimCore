@@ -16,7 +16,8 @@ use crate::reactions::E_THERMAL;
 use crate::sim::Sim;
 use crate::types::ids;
 use macroquad::math::{Rect, Vec2};
-use std::collections::{HashMap, VecDeque};
+use crate::rng::HashMap;
+use std::collections::VecDeque;
 
 /// Q value of 10B(n,alpha)7Li (MeV), ground-state branch.
 pub const Q_BORON: f64 = 2.79;
@@ -349,10 +350,10 @@ pub fn update(sim: &mut Sim, dt: f32) {
     // ---- Startup sources: 9Be(alpha,n)12C, neutrons of a few MeV ----
     let mut added = false;
     for &at in &re.sources {
-        if re.source_rate > 0.0 && 1.0 - macroquad::rand::gen_range(0.0f32, 1.0) <= re.source_rate * dt {
-            let a = macroquad::rand::gen_range(0.0, std::f32::consts::TAU);
+        if re.source_rate > 0.0 && 1.0 - crate::rng::gen_range(0.0f32, 1.0) <= re.source_rate * dt {
+            let a = crate::rng::gen_range(0.0, std::f32::consts::TAU);
             let u = Vec2::new(a.cos(), a.sin());
-            let e = macroquad::rand::gen_range(1.0f64, 8.0);
+            let e = crate::rng::gen_range(1.0f64, 8.0);
             let v = crate::nuclear::speed_for(&sim.cfg, e, 1.0).min(sim.cfg.max_speed);
             sim.add(at + u * 2.0, u * v, ids::NEUTRON);
             added = true;
@@ -376,8 +377,8 @@ pub fn update(sim: &mut Sim, dt: f32) {
                 // be displaced.
                 for _ in 0..12 {
                     let p = Vec2::new(
-                        macroquad::rand::gen_range(area.x, area.x + area.w),
-                        macroquad::rand::gen_range(area.y, area.y + area.h),
+                        crate::rng::gen_range(area.x, area.x + area.w),
+                        crate::rng::gen_range(area.y, area.y + area.h),
                     );
                     let ok = place_nucleus(sim, p, sp.z, sp.n, sp.vel)
                         || (sp.z + sp.n >= 20 && displace_light(sim, p, sp.z + sp.n) && place_nucleus(sim, p, sp.z, sp.n, sp.vel));
@@ -401,8 +402,8 @@ pub fn update(sim: &mut Sim, dt: f32) {
                 };
                 let mut ok = false;
                 for _ in 0..6 {
-                    let a = macroquad::rand::gen_range(0.0, std::f32::consts::TAU);
-                    let d = spread * macroquad::rand::gen_range(0.0f32, 1.0).sqrt();
+                    let a = crate::rng::gen_range(0.0, std::f32::consts::TAU);
+                    let d = spread * crate::rng::gen_range(0.0f32, 1.0).sqrt();
                     if place_nucleus(sim, sp.pos + Vec2::new(a.cos(), a.sin()) * d, sp.z, sp.n, sp.vel) {
                         ok = true;
                         break;
@@ -454,7 +455,7 @@ pub fn update(sim: &mut Sim, dt: f32) {
             let e = energy_of(&sim.cfg, v, 1.0).max(1e-12);
             let mu = ROD_MU_THERMAL * (E_THERMAL / e).sqrt().min(crate::reactions::SUBTHERMAL_CAP) as f32;
             let p_abs = 1.0 - (-(mu * v * dt)).exp();
-            if 1.0 - macroquad::rand::gen_range(0.0f32, 1.0) <= p_abs {
+            if 1.0 - crate::rng::gen_range(0.0f32, 1.0) <= p_abs {
                 dead[i] = true;
                 absorbed += 1;
             }
@@ -637,7 +638,7 @@ fn drain(sim: &mut Sim, re: &mut Reactor, dt: f32) {
     for d in re.drains.iter_mut() {
         for (&tag, b) in &bodies {
             let (p, v, a, z) = (b.pos, b.vel, b.a(), b.z);
-            let roll = d.per_second <= 0.0 || 1.0 - macroquad::rand::gen_range(0.0f32, 1.0) <= d.per_second * dt;
+            let roll = d.per_second <= 0.0 || 1.0 - crate::rng::gen_range(0.0f32, 1.0) <= d.per_second * dt;
             if d.rect.contains(p) && d.filter.takes(z, a - z) && roll && !gone.contains(&tag) {
                 gone.push(tag);
                 d.removed += 1;

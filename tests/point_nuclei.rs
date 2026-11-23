@@ -80,8 +80,8 @@ fn point_uranium_fissions_with_thermal_neutrons() {
     let mut fissions = 0;
     let trials = 20;
     for k in 0..trials {
-        macroquad::rand::srand(100 + k);
         let mut sim = game_sim(1000.0, 700.0);
+        sim.seed = 100 + k;
         sim.point_nuclei = true;
         assert!(place_nucleus(&mut sim, vec2(500.0, 350.0), 92, 143, Vec2::ZERO));
         assert_eq!(sim.len(), 1, "one particle per nucleus");
@@ -104,8 +104,8 @@ fn point_uranium_fissions_with_thermal_neutrons() {
 /// Fast neutrons in a box of point deuterium slow down to near thermal.
 #[test]
 fn point_moderation_thermalizes() {
-    macroquad::rand::srand(5);
     let mut sim = game_sim(1000.0, 700.0);
+    sim.seed = 5;
     sim.point_nuclei = true;
     sim.walls.half = 2.0;
     let (x0, y0, x1, y1) = (200.0, 150.0, 800.0, 550.0);

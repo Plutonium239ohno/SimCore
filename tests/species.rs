@@ -111,8 +111,9 @@ fn reactions_in_the_engine() {
     assert_eq!(sim.nuclear.fusions, 0, "slow D + D can't tunnel");
 
     let mut fissions = 0;
-    for _ in 0..5 {
+    for k in 0..5 {
         let mut sim = setup();
+        sim.seed = 20 + k;
         place_nucleus(&mut sim, vec2(330.0, 200.0), 92, 143, vec2(0.0, 0.0));
         sim.add(vec2(220.0, 200.0), vec2(15.0, 0.0), ids::NEUTRON);
         for _ in 0..600 { sim.step(1.0 / 60.0, None); }

@@ -9,12 +9,13 @@ use sim_core::types::ids;
 use std::collections::BTreeMap;
 
 fn main() {
-    macroquad::rand::srand(std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(7));
+    let seed: u64 = std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
     let rod: f32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let secs: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30);
     let preset: usize = std::env::var("PRESET").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
     let mut sim = sim_core::nuclear::game_sim(1600.0, 900.0);
     sim.point_nuclei = std::env::var("POINTS").is_ok();
+    sim.seed = seed;
     scenes::load_preset(&mut sim, preset);
     if let Some(v) = std::env::var("XS").ok().and_then(|s| s.parse().ok()) {
         sim.cfg.xs_scale = v;

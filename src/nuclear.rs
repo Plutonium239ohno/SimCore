@@ -20,8 +20,9 @@ use crate::reactions::{self, Step};
 use crate::sim::{Config, Sim};
 use crate::types::{ParticleType, ids};
 use macroquad::math::{Vec2, vec2};
-use macroquad::rand::gen_range;
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::rng::gen_range;
+use crate::rng::{HashMap, HashSet};
+use std::collections::VecDeque;
 
 pub use crate::nucdata::format_time;
 pub use crate::nucdata::nuclide_name;
@@ -504,7 +505,7 @@ pub fn process(sim: &mut Sim, dt: f32) {
     let mut comp_of = vec![u32::MAX; n];
     let mut comps: Vec<Comp> = Vec::new();
     {
-        let mut by_tag: HashMap<u32, u32> = HashMap::new();
+        let mut by_tag: HashMap<u32, u32> = HashMap::default();
         for i in 0..n {
             if !sim.is_nuclear(i) {
                 continue;
@@ -551,7 +552,7 @@ pub fn process(sim: &mut Sim, dt: f32) {
         .collect();
     pairs.sort_unstable();
     pairs.dedup();
-    let mut touching_now = HashSet::new();
+    let mut touching_now = HashSet::default();
     for (a, b) in pairs {
         let (ta, tb) = (comps[a as usize].tag, comps[b as usize].tag);
         let key = (ta.min(tb), ta.max(tb));
@@ -572,7 +573,7 @@ pub fn process(sim: &mut Sim, dt: f32) {
     }
 
     // ---- 3. Census + decays ----
-    let mut census: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut census: HashMap<(u32, u32), u32> = HashMap::default();
     for k in 0..comps.len() {
         if comps[k].consumed {
             continue;
@@ -1354,7 +1355,7 @@ const RECOIL_FAST: f64 = 1e-6;
 /// neutron's path passes within the interaction radius of a nucleus.
 fn neutron_encounters(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp], comp_of: &[u32], n: usize, dt: f32) {
     let reach = (POINT_XS_MAX * sim.grid.inv).ceil() as i32;
-    let mut near_now: HashSet<(u32, u32)> = HashSet::new();
+    let mut near_now: HashSet<(u32, u32)> = HashSet::default();
     for i in 0..n {
         if sim.kind[i] != ids::NEUTRON || fr.dead[i] {
             continue;
