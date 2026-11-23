@@ -443,8 +443,69 @@ pub fn draw_reactor(sim: &Sim) {
         }
         draw_circle(p.x, p.y, 1.2, c);
     }
+    for f in &re.fields {
+        let r = f.rect;
+        let (fill, edge) = if f.b != 0.0 { (Color::new(0.55, 0.35, 1.0, 0.06), Color::new(0.7, 0.55, 1.0, 0.5)) } else { (Color::new(0.3, 0.9, 1.0, 0.05), Color::new(0.4, 0.9, 1.0, 0.5)) };
+        draw_rectangle(r.x, r.y, r.w, r.h, fill);
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, edge);
+        // B: dots (out of the screen) or crosses (into it) on a grid; E: arrows.
+        let step = 36.0;
+        let mut y = r.y + step * 0.5;
+        while y < r.bottom() {
+            let mut x = r.x + step * 0.5;
+            while x < r.right() {
+                if f.b > 0.0 {
+                    draw_circle_lines(x, y, 3.0, 1.0, Color::new(0.7, 0.55, 1.0, 0.35));
+                    draw_circle(x, y, 1.0, Color::new(0.7, 0.55, 1.0, 0.5));
+                } else if f.b < 0.0 {
+                    draw_line(x - 2.5, y - 2.5, x + 2.5, y + 2.5, 1.0, Color::new(0.7, 0.55, 1.0, 0.4));
+                    draw_line(x - 2.5, y + 2.5, x + 2.5, y - 2.5, 1.0, Color::new(0.7, 0.55, 1.0, 0.4));
+                }
+                if f.e.length() > 0.0 {
+                    let d = f.e.normalize() * 9.0;
+                    let (a, b) = (vec2(x, y) - d, vec2(x, y) + d);
+                    let c = Color::new(0.4, 0.9, 1.0, 0.4);
+                    draw_line(a.x, a.y, b.x, b.y, 1.0, c);
+                    let back = -d.normalize() * 3.5;
+                    let side = vec2(-back.y, back.x);
+                    draw_line(b.x, b.y, b.x + back.x + side.x, b.y + back.y + side.y, 1.0, c);
+                    draw_line(b.x, b.y, b.x + back.x - side.x, b.y + back.y - side.y, 1.0, c);
+                }
+                x += step;
+            }
+            y += step;
+        }
+        let label = match (f.e.length() > 0.0, f.b != 0.0) {
+            (true, true) => "E + B field",
+            (true, false) => "E field",
+            _ => "B field",
+        };
+        draw_text(label, r.x + 3.0, r.y + 11.0, 13.0, edge);
+    }
+    for (k, d) in re.detectors.iter().enumerate() {
+        let c = Color::new(0.55, 1.0, 0.6, 0.75);
+        let label = format!("D{}  {}", k + 1, d.count);
+        match d.shape {
+            crate::detector::DetShape::Box(r) => {
+                dashed_rect(r, c);
+                draw_text(&label, r.x + 3.0, r.y + r.h - 4.0, 13.0, c);
+            }
+            crate::detector::DetShape::Line(a, b) => {
+                dashed(a, b, Color::new(c.r, c.g, c.b, 0.9), 1.5);
+                let m = (a + b) * 0.5;
+                draw_text(&label, m.x + 5.0, m.y - 5.0, 13.0, c);
+            }
+        }
+    }
     for sp in &re.spawners {
         let c = Color::from_rgba(255, 210, 90, 230);
+        if sp.beam && sp.width > 0.5 && sp.vel.length() > 0.5 {
+            let d = sp.vel.normalize();
+            let side = vec2(-d.y, d.x) * sp.width * 0.5;
+            let (a, b) = (sp.pos - side, sp.pos + side);
+            let on = if sp.firing() { 0.85 } else { 0.3 };
+            draw_line(a.x, a.y, b.x, b.y, 2.0, Color::new(1.0, 0.82, 0.35, on));
+        }
         draw_circle_lines(sp.pos.x, sp.pos.y, 5.0, 1.0, c);
         if sp.vel.length() > 0.5 {
             let tip = sp.pos + sp.vel.normalize() * (8.0 + sp.vel.length().sqrt() * 1.5);
@@ -464,7 +525,7 @@ pub fn draw_reactor(sim: &Sim) {
             crate::reactor::DrainFilter::All => "drain",
             crate::reactor::DrainFilter::FissionProducts => "reprocess",
             crate::reactor::DrainFilter::OffGas => "off-gas",
-            crate::reactor::DrainFilter::NotFuel => "fuel filter",
+            crate::reactor::DrainFilter::NotFuel => "all but fuel & n",
             crate::reactor::DrainFilter::SpentProducts => "reprocessing",
         };
         draw_text(label, r.x + 3.0, r.y + 11.0, 13.0, Color::new(1.0, 0.55, 0.5, 0.8));
@@ -492,6 +553,29 @@ pub fn draw_reactor(sim: &Sim) {
             }
         }
     }
+}
+
+/// A dashed line.
+fn dashed(a: Vec2, b: Vec2, c: Color, w: f32) {
+    let len = a.distance(b);
+    if len < 1e-3 {
+        return;
+    }
+    let d = (b - a) / len;
+    let mut t = 0.0;
+    while t < len {
+        let (p, q) = (a + d * t, a + d * (t + 6.0).min(len));
+        draw_line(p.x, p.y, q.x, q.y, w, c);
+        t += 10.0;
+    }
+}
+
+fn dashed_rect(r: Rect, c: Color) {
+    let (a, b, cc, d) = (vec2(r.x, r.y), vec2(r.right(), r.y), vec2(r.right(), r.bottom()), vec2(r.x, r.bottom()));
+    dashed(a, b, c, 1.0);
+    dashed(b, cc, c, 1.0);
+    dashed(cc, d, c, 1.0);
+    dashed(d, a, c, 1.0);
 }
 
 /// Colour for a temperature ratio to ambient: blue-grey cold, through

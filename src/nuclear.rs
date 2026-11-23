@@ -327,6 +327,10 @@ pub struct NuclearState {
     near: HashSet<(u32, u32)>,
     /// Products of nuclear events still moving fast (being stopped).
     pub fast: HashSet<u32>,
+    /// Nuclei fired by a beam (they keep their energy through thin matter
+    /// like reaction products; a nucleus merely shoved fast by a collision
+    /// does not).
+    pub beam: HashSet<u32>,
     /// Fast charged nuclei at the start of this frame: (tag, centre,
     /// velocity, radius). Their whole path through the frame is checked for
     /// contacts: a fast ion that hit something mid-frame has bounced away
@@ -815,6 +819,10 @@ pub fn process(sim: &mut Sim, dt: f32) {
     }
 
     st.sweep_vel.clear();
+    if st.beam.len() > 20_000 {
+        let alive: HashSet<u32> = sim.tag.iter().copied().collect();
+        st.beam.retain(|t| alive.contains(t));
+    }
 
     // ---- 5. Apply ----
     for (t, ev) in fr.new_grace.drain(..) {
@@ -879,7 +887,17 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
         // Fast ions (beyond ~100 MeV/u) go further than a nuclear mean
         // free path before they stop: no suppression at ~1 GeV/u.
         let e_lab = e / mu as f64;
-        let thick = if sim.cfg.matter { (e_lab / 1000.0).powf(1.5).clamp(1e-3, 1.0) } else { 1.0 };
+        // In a plasma (vacuum here) a fresh fast product - a fusion alpha, a
+        // triton - glances off thousands of ions by Coulomb scattering for
+        // every nuclear reaction it makes: one sim contact is not one try.
+        let product = st.fast.contains(&comps[a].tag) || st.fast.contains(&comps[b].tag);
+        let thick = if sim.cfg.matter {
+            (e_lab / 1000.0).powf(1.5).clamp(1e-3, 1.0)
+        } else if product && e_lab < FRAG_START {
+            0.02
+        } else {
+            1.0
+        };
         (reactions::penetrability(e, za, za + na, zb, zb + nb) * sim.cfg.tunneling as f64 * thick).min(1.0)
     };
     if !chance(p) {

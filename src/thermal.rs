@@ -242,8 +242,13 @@ pub fn apply(sim: &mut Sim, dt: f32) {
                 // Stopping power falls off with energy (Bethe: ~1/v^2): a
                 // GeV proton crosses metres of metal, a fission fragment
                 // stops in microns.
+                // (Only for real fast ions - reaction products and beams. A
+                // light nucleus knocked fast by a heavy one in a collision
+                // gets far too much energy in the sim's compressed units, and
+                // is stopped at once, as before.)
+                let real = st.fast.contains(&x.tag) || st.beam.contains(&x.tag);
                 let per_u = energy_of(&cfg, speed, 1.0);
-                let g = f * (1.0 / per_u.max(1e-9)).powf(0.8).min(1.0) as f32;
+                let g = if real { f * (1.0 / per_u.max(1e-9)).powf(0.8).min(1.0) as f32 } else { f };
                 bath = (-cfg.cooling * g * dt).exp();
                 let s2 = speed * if g >= 1.0 { stop } else { (-cfg.stopping * g * dt).exp() };
                 let new_v = if speed > 1e-6 { v * (s2 / speed) } else { v };
@@ -254,6 +259,7 @@ pub fn apply(sim: &mut Sim, dt: f32) {
                 }
                 if s2 < 2.0 * v_th.max(1.0) {
                     st.fast.remove(&x.tag);
+                    st.beam.remove(&x.tag);
                 }
             } else if !fast {
                 st.fast.remove(&x.tag);

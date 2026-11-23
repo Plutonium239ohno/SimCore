@@ -116,6 +116,11 @@ impl Measure {
 
     /// Current value, averaged over the last second (None before any sample).
     pub fn value(self, sim: &Sim) -> Option<f64> {
+        self.average(sim, 4)
+    }
+
+    /// Value averaged over the last `k` samples.
+    pub fn average(self, sim: &Sim, k: usize) -> Option<f64> {
         let re = &sim.reactor;
         if let Measure::Detector(k) = self {
             return re.detectors.get(k).map(|d| d.rate as f64);
@@ -126,7 +131,7 @@ impl Measure {
                 _ => f64::INFINITY,
             });
         }
-        let k = re.samples.len().min(4);
+        let k = re.samples.len().min(k.max(1));
         if k == 0 {
             return None;
         }
@@ -204,10 +209,10 @@ fn log_error(m: f64, set: f64) -> f64 {
     ((m.max(0.0) + floor) / (set.abs() + floor)).ln().clamp(-2.0, 2.0)
 }
 
-/// Growth rate (per s) of the reading over the last ~2 s.
+/// Growth rate (per s) of the reading over the last ~6 s.
 fn growth(sim: &Sim, m: Measure) -> f64 {
     let s = &sim.reactor.samples;
-    if s.len() < 12 {
+    if s.len() < 24 {
         return 0.0;
     }
     let val = |x: &crate::reactor::Sample| -> f64 {
@@ -221,11 +226,11 @@ fn growth(sim: &Sim, m: Measure) -> f64 {
             _ => 0.0,
         }
     };
-    let v: Vec<f64> = s.iter().rev().take(12).map(val).collect();
-    let newer = v[..4].iter().sum::<f64>() / 4.0;
-    let older = v[8..].iter().sum::<f64>() / 4.0;
-    let floor = newer.abs().max(older.abs()) * 0.02 + 1e-30;
-    (((newer.max(0.0) + floor) / (older.max(0.0) + floor)).ln() / (8.0 * SAMPLE_DT as f64)).clamp(-1.0, 1.0)
+    let v: Vec<f64> = s.iter().rev().take(24).map(val).collect();
+    let newer = v[..8].iter().sum::<f64>() / 8.0;
+    let older = v[16..].iter().sum::<f64>() / 8.0;
+    let floor = newer.abs().max(older.abs()) * 0.1 + 1e-30;
+    (((newer.max(0.0) + floor) / (older.max(0.0) + floor)).ln() / (16.0 * SAMPLE_DT as f64)).clamp(-1.0, 1.0)
 }
 
 impl Controller {
@@ -244,7 +249,8 @@ impl Controller {
             return;
         }
         self.last_t = last.t;
-        let Some(m) = self.measure.value(sim) else { return };
+        // A few seconds of readings: reaction rates are counts, and noisy.
+        let Some(m) = self.measure.average(sim, 16) else { return };
         // A period reading is held *above* its set point: shorter = too fast.
         let (err, rate) = if self.measure == Measure::Period {
             let p = if m.is_finite() { m } else { 1e6 };
@@ -255,17 +261,17 @@ impl Controller {
         // Proportional on the (log) error plus a strong damping on the
         // growth rate: delayed neutrons make a reactor slow to answer, so
         // the controller watches where it is heading, not just where it is.
-        let u = self.gain as f64 * (0.6 * err + 4.0 * rate);
+        let u = self.gain as f64 * (0.5 * err + 3.0 * rate);
         let re = &mut sim.reactor;
         match self.actuator {
             Actuator::Rods => {
                 if re.rods.is_empty() || re.scram {
                     return;
                 }
-                re.target = (re.target + (u * 0.02) as f32).clamp(0.0, 1.0);
+                re.target = (re.target + (u * 0.006) as f32).clamp(0.0, 1.0);
             }
             Actuator::Feeds => {
-                re.throttle = (re.throttle - (u * 0.05) as f32).clamp(0.0, 1.0);
+                re.throttle = (re.throttle - (u * 0.02) as f32).clamp(0.0, 1.0);
             }
         }
     }

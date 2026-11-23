@@ -443,7 +443,8 @@ impl Gui {
             draw_line(b.x + 4.0, b.y + 9.5, b.x + 7.5, b.y + 13.0, 2.0, col::TEXT);
             draw_line(b.x + 7.5, b.y + 13.0, b.x + 14.0, b.y + 5.0, 2.0, col::TEXT);
         }
-        let (t, _) = self.fit(label, r.w - 28.0, self.size - 1.0);
+        let shown = label.split_once("##").map_or(label, |p| p.0);
+        let (t, _) = self.fit(shown, r.w - 28.0, self.size - 1.0);
         self.text(&t, r.x + 26.0, r.y + 3.0, self.size - 1.0, if hov { col::TEXT } else { Color::new(0.82, 0.84, 0.9, 1.0) });
         if clicked {
             *v = !*v;

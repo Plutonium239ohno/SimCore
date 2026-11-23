@@ -679,6 +679,10 @@ pub fn update(sim: &mut Sim, dt: f32) {
                     if sp.burst > 0 { sp.burst -= 1 } else { sp.acc -= 1.0 }
                     sp.spawned += 1;
                     re.beam_mev += energy_of(&sim.cfg, v.length(), (sp.z + sp.n) as f32);
+                    if sp.beam {
+                        let t = sim.next_tag;
+                        sim.nuclear.beam.insert(t);
+                    }
                     added = true;
                 } else {
                     sp.acc = sp.acc.min(1.5); // blocked: try again next frame

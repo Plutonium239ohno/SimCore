@@ -7,7 +7,10 @@ and [NuclearSim](https://github.com/Plutonium239ohno/NuclearSim).
   Barnes–Hut, interaction-rule matrix, nuclear clusters and point nuclei)
 - `walls` — wall segments: insulators, conductors, freeze plugs, filters
 - `nuclear`, `nucdata`, `reactions`, `reactor`, `thermal`, `game_scenes` —
-  nuclear physics and the Nuclear Game's scenarios
+  nuclear physics (compound-nucleus reactions, fragmentation at high
+  energy, decays, lineage) and the Nuclear Game's scenarios
+- `field`, `detector`, `control`, `inventory` — electric/magnetic field
+  regions, detectors, the controller and rules, inventory and decay heat
 - `render`, `gui`, `zoom`, `skin` — drawing, panel GUI, magnifier, font
 
 ```

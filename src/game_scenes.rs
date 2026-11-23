@@ -461,10 +461,10 @@ pub const PRESETS: [(&str, &str); 15] = [
     ("D-D fusion plasma", "hot deuterium alone: D + D → He-3 + n or T + p, about half each (3-4 MeV); needs hotter plasma than D-T"),
     ("D-He-3 fusion plasma", "deuterium + helium-3: D + He-3 → He-4 + p (18.4 MeV), almost no neutrons - but even hotter"),
     ("p-B-11 fusion plasma", "protons + boron-11: p + B-11 → 3 He-4 (8.7 MeV), no neutrons at all; the hardest to light (tunnelling ×30)"),
-    ("Magnetic bottle", "D-T plasma held in a magnetic field: the ions circle and stay in, the fusion neutrons fly straight out to the neutron detectors in the walls"),
+    ("Magnetic bottle", "D-T plasma held in a magnetic field and topped up by fuel feeds: the ions circle and stay in, the fusion products heat it (watch it ignite), the neutrons fly straight out to the detectors; the Auto tab can throttle the feeds"),
     ("Neutron generator", "a 1 MeV deuteron beam into a solid tritium target (tunnelling ×300): D + T → He-4 + 14 MeV neutron; as deuterium builds up in the target, D + D joins in (real generators see this too)"),
     ("Spallation source", "a 1 GeV proton beam on a lead target: each proton shatters a nucleus and boils off a shower of neutrons"),
-    ("Heavy-ion collider", "two Ca-40 beams at 100 MeV/u head-on: the nuclei shatter (fragmentation); detectors count the charged and neutral debris"),
+    ("Heavy-ion collider", "two Ca-40 beams at 30 MeV/u each, head-on (120 MeV/u as a beam on a target): the nuclei shatter (fragmentation); detectors count the charged and neutral debris"),
 ];
 
 /// Random velocity whose kinetic energy is about `mev` for mass `a`.
@@ -662,24 +662,49 @@ fn bottle_preset(sim: &mut Sim) {
     use crate::detector::{DetShape, DetectFilter, Detector};
     let c = view_center(sim);
     sim.cfg = sim.cfg.clone().with_medium(false);
+    // A real plasma is neutral on average (its electrons cancel the ions'
+    // charge), so it doesn't blow itself apart: no long-range Coulomb push.
+    // Fusion still has to tunnel through the barrier.
+    sim.cfg.coulomb = false;
     sim.cfg.energy_exponent = 1.0;
-    sim.cfg.tunneling = 3.0;
+    sim.cfg.tunneling = 1.0;
     let (bw, bh) = ((sim.width - PANEL_W).clamp(400.0, 900.0) * 0.8, (sim.height * 0.75).min(560.0));
     let r = Rect::new(c.x - bw * 0.5, c.y - bh * 0.5, bw, bh);
-    // A D at 30 keV circles at ~40 px.
-    let v = speed_for(&sim.cfg, 0.03, 2.0);
-    let b = v / 40.0 * 2.0; // proton turn rate: a deuteron (q/m = 1/2) turns half as fast
+    // A D at 12 keV circles at ~30 px.
+    let v = speed_for(&sim.cfg, 0.012, 2.0);
+    let b = v / 30.0 * 2.0; // proton turn rate: a deuteron (q/m = 1/2) turns half as fast
     sim.reactor.fields.push(crate::field::Field::new(r, Vec2::ZERO, b));
     sim.walls.half = 2.0;
     box_walls(sim, Rect::new(r.x - 6.0, r.y - 6.0, r.w + 12.0, r.h + 12.0), [WallKind::Conductor; 4]);
+    // The first wall takes what reaches it (fast fusion products leave the
+    // field on wide circles; neutrons fly straight out).
+    let wall = 10.0;
+    // (Neutrons pass: the detectors outside count them.)
+    for d in [Rect::new(r.x, r.y, r.w, wall), Rect::new(r.x, r.bottom() - wall, r.w, wall), Rect::new(r.x, r.y, wall, r.h), Rect::new(r.right() - wall, r.y, wall, r.h)] {
+        sim.reactor.drains.push(Drain::new(d, DrainFilter::NotFuel));
+    }
+    // Beyond the detectors, a shield takes everything (so nothing comes back
+    // to be counted twice).
+    let o = Rect::new(r.x - 40.0, r.y - 40.0, r.w + 80.0, r.h + 80.0);
+    for d in [Rect::new(o.x, o.y, o.w, 18.0), Rect::new(o.x, o.bottom() - 18.0, o.w, 18.0), Rect::new(o.x, o.y, 18.0, o.h), Rect::new(o.right() - 18.0, o.y, 18.0, o.h)] {
+        sim.reactor.drains.push(Drain::new(d, DrainFilter::All));
+    }
     for (a, bb) in [(vec2(r.x - 14.0, r.y - 14.0), vec2(r.right() + 14.0, r.y - 14.0)), (vec2(r.x - 14.0, r.bottom() + 14.0), vec2(r.right() + 14.0, r.bottom() + 14.0))] {
         sim.reactor.detectors.push(Detector::new(DetShape::Line(a, bb), DetectFilter::Element(0), false));
     }
     let inner = Rect::new(r.x + r.w * 0.2, r.y + r.h * 0.2, r.w * 0.6, r.h * 0.6);
-    for k in 0..360 {
+    // Fuel feeds (like pellet injection): keep the inner region topped up
+    // with cold D and T as the plasma burns.
+    for (z, n) in [(1, 1), (1, 2)] {
+        let mut feed = Spawner::new(inner.center(), z, n, Vec2::ZERO, 20.0);
+        feed.keep = 100;
+        feed.area = Some(inner);
+        sim.reactor.spawners.push(feed);
+    }
+    for k in 0..240 {
         let at = vec2(gen_range(inner.x, inner.right()), gen_range(inner.y, inner.bottom()));
         let (z, n) = if k % 2 == 0 { (1, 1) } else { (1, 2) };
-        let v = thermal(sim, 0.03, (z + n) as f32);
+        let v = thermal(sim, 0.012, (z + n) as f32);
         put(sim, at, z, n, v, 0);
     }
 }
@@ -736,7 +761,7 @@ fn collider_preset(sim: &mut Sim) {
     use crate::detector::{DetShape, DetectFilter, Detector};
     let c = view_center(sim);
     sim.cfg = sim.cfg.clone().with_medium(false);
-    let e = 100.0f64.min(crate::reactor::max_beam_energy(&sim.cfg));
+    let e = 30.0f64.min(crate::reactor::max_beam_energy(&sim.cfg));
     let mut a = Spawner::beam(&sim.cfg, vec2(c.x - 380.0, c.y), 20, 20, Vec2::X, e, 4.0);
     a.width = 30.0;
     let b = a.mirrored(c);
