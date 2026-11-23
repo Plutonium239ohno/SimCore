@@ -18,4 +18,5 @@ pub mod render;
 pub mod skin;
 pub mod gui;
 pub mod zoom;
+pub mod overlay;
 pub mod game_scenes;

@@ -101,6 +101,10 @@ pub struct Config {
     /// Linear drag per second (0 = none).
     pub drag: f32,
     pub max_speed: f32,
+    /// Wrap-around world: what leaves one edge comes back at the opposite
+    /// one, and particles near opposite edges feel each other. (Long-range
+    /// gravity and Coulomb don't wrap.)
+    pub wrap: bool,
 }
 
 impl Default for Config {
@@ -143,6 +147,7 @@ impl Default for Config {
             light_speed: 1200.0,
             drag: 0.1,
             max_speed: 1500.0,
+            wrap: false,
         }
     }
 }
@@ -163,6 +168,8 @@ struct Table {
     inv_mass: Vec<f32>,
     charge: Vec<f32>,
     rules: Vec<f32>,
+    rule_range: Vec<f32>,
+    rule_core: Vec<f32>,
     ghost: Vec<bool>,
     collides: Vec<bool>,
     max_radius: f32,
@@ -605,15 +612,7 @@ impl Sim {
             }
         }
         self.types.remove(ku);
-        let n = self.types.len();
-        let mut r = crate::types::RuleMatrix::zero(n);
-        for a in 0..n {
-            for b in 0..n {
-                let (oa, ob) = (a + (a >= ku) as usize, b + (b >= ku) as usize);
-                r.set(a, b, self.rules.get(oa, ob));
-            }
-        }
-        self.rules = r;
+        self.rules.remove(ku);
     }
 
     /// Copy of species `k` (same rules towards and from everyone) as a new
@@ -631,13 +630,7 @@ impl Sim {
         let n = self.types.len();
         self.rules.resize(n);
         let new = n - 1;
-        for j in 0..n - 1 {
-            let (a, b) = (self.rules.get(k as usize, j), self.rules.get(j, k as usize));
-            self.rules.set(new, j, a);
-            self.rules.set(j, new, b);
-        }
-        let own = self.rules.get(k as usize, k as usize);
-        self.rules.set(new, new, own);
+        self.rules.copy_type(k as usize, new);
         Some(new as u8)
     }
 
@@ -729,6 +722,8 @@ impl Sim {
             inv_mass: self.types.iter().map(|t| 1.0 / t.mass.max(1e-6)).collect(),
             charge: self.types.iter().map(|t| t.charge).collect(),
             rules: self.rules.strength.clone(),
+            rule_range: self.rules.range.clone(),
+            rule_core: self.rules.core.clone(),
             ghost: self.types.iter().map(|t| t.ghost).collect(),
             // Point-nucleus mode: free neutrons fly through everything but
             // walls; their scattering and absorption are rolled in nuclear.rs.
@@ -816,6 +811,13 @@ impl Sim {
             self.solve_positions(&t, h);
             lap(3, &mut self.timings);
             self.solve_velocities(&t, h);
+            if self.cfg.wrap {
+                let (w, hgt) = (self.width, self.height);
+                self.pos.par_iter_mut().for_each(|p| {
+                    p.x = p.x.rem_euclid(w);
+                    p.y = p.y.rem_euclid(hgt);
+                });
+            }
             lap(4, &mut self.timings);
         }
 
@@ -843,6 +845,7 @@ impl Sim {
     }
 
     fn sort_by_cell(&mut self, cell: f32) {
+        self.grid.wrap = self.cfg.wrap;
         self.grid.build(&self.pos, self.width, self.height, cell);
         let order = &self.grid.order;
         permute(&self.pos, &mut self.buf_pos, order);
@@ -972,7 +975,7 @@ impl Sim {
         let range = cfg.rule_range;
         let nucleon_r = t.radius[ids::NEUTRON as usize].max(t.radius[ids::PROTON as usize]);
         let strong_reach = 2.0 * nucleon_r * (1.0 + cfg.strong_range);
-        let mut search = if rules_on { range } else { 0.0 };
+        let mut search = if rules_on { range * self.rules.max_range() } else { 0.0 };
         if strong_on {
             search = search.max(strong_reach);
         }
@@ -986,6 +989,8 @@ impl Sim {
         let round_acc = if strong_on { &self.round_acc[..] } else { &[] };
         let n = t.n;
         let (pos, kind, grid) = (&self.pos, &self.kind, &self.grid);
+        let (wrap, ww, wh) = (self.cfg.wrap, self.width, self.height);
+        let mi = move |d: Vec2| if wrap { min_image(d, ww, wh) } else { d };
 
         out.par_iter_mut().enumerate().for_each(|(i, a)| {
             let ti = kind[i] as usize;
@@ -995,11 +1000,13 @@ impl Sim {
             let p = pos[i];
             let ri = t.radius[ti];
             let row = &t.rules[ti * n..ti * n + n];
+            let row_range = &t.rule_range[ti * n..ti * n + n];
+            let row_core = &t.rule_core[ti * n..ti * n + n];
             let i_nucleon = strong_on && ParticleType::is_nucleon(ti as u8);
             let mut f_rule = Vec2::ZERO;
             let mut f_strong = Vec2::ZERO;
             grid.for_each_near(p, reach, |j| {
-                let d = pos[j] - p;
+                let d = mi(pos[j] - p);
                 let d2 = d.length_squared();
                 if d2 >= search2 || d2 == 0.0 {
                     return;
@@ -1024,14 +1031,24 @@ impl Sim {
                     }
                 }
 
-                if rules_on && dist < range {
+                let pair_range = range * row_range[tj];
+                if rules_on && dist < pair_range {
                     let s = if dist > rs {
-                        if range <= rs {
+                        if pair_range <= rs {
                             0.0
                         } else {
-                            // Triangle profile: 0 at contact, peak mid-range, 0 at range.
-                            let x = (dist - rs) / (range - rs);
-                            row[tj] * (1.0 - (2.0 * x - 1.0).abs())
+                            let x = (dist - rs) / (pair_range - rs);
+                            let core = row_core[tj];
+                            if x < core {
+                                // Inner zone: push apart whatever the rule
+                                // says (-1 at contact, 0 at the zone's edge).
+                                x / core - 1.0
+                            } else {
+                                // Triangle profile over the rest: 0 at its
+                                // ends, peak in the middle.
+                                let y = (x - core) / (1.0 - core);
+                                row[tj] * (1.0 - (2.0 * y - 1.0).abs())
+                            }
                         }
                     } else if !collisions {
                         // Soft core repulsion so overlapping particles separate.
@@ -1110,6 +1127,8 @@ impl Sim {
     fn solve_positions(&mut self, t: &Table, h: f32) {
         let collisions = self.cfg.collisions;
         let (w, hgt) = (self.width, self.height);
+        let wrap = self.cfg.wrap;
+        let mi = move |d: Vec2| if wrap { min_image(d, w, hgt) } else { d };
         let iters = if collisions { self.cfg.iterations.max(1) } else { 1 };
         const OMEGA: f32 = 1.5; // over-relaxation; Jacobi averaging under-corrects otherwise
         // Inserted control rods: solid to everything but free neutrons.
@@ -1182,7 +1201,7 @@ impl Sim {
                         if !t.collides[tj] {
                             return;
                         }
-                        let d = p - pos[j];
+                        let d = mi(p - pos[j]);
                         let d2 = d.length_squared();
                         let rs = ri + t.radius[tj];
                         if d2 >= rs * rs {
@@ -1231,8 +1250,12 @@ impl Sim {
                 if !rods.is_empty() && rod_solid(kind[i], i_multi) {
                     q = crate::reactor::push_out(rods, q, ri);
                 }
-                q.x = q.x.clamp(ri, (w - ri).max(ri));
-                q.y = q.y.clamp(ri, (hgt - ri).max(ri));
+                if !wrap {
+                    if !wrap {
+                        q.x = q.x.clamp(ri, (w - ri).max(ri));
+                        q.y = q.y.clamp(ri, (hgt - ri).max(ri));
+                    }
+                }
                 if i_multi {
                     // Hand external pushes (contacts + walls) to the nucleus.
                     let wall = q - p;
@@ -1320,6 +1343,8 @@ impl Sim {
         }
         let collisions = self.cfg.collisions;
         let (w, hgt) = (self.width, self.height);
+        let wrap = self.cfg.wrap;
+        let mi = move |d: Vec2| if wrap { min_image(d, w, hgt) } else { d };
         let _ = h;
         // Slower contacts are left inelastic so piles settle under gravity.
         // A nuclear world has no gravity and its cold heavy gases move at
@@ -1402,11 +1427,11 @@ impl Sim {
                     }
                     // A contact = a pair that overlapped before the position solve.
                     let rs = ri + t.radius[tj];
-                    let dpred = pred[i] - pred[j];
+                    let dpred = mi(pred[i] - pred[j]);
                     if dpred.length_squared() >= rs * rs {
                         return;
                     }
-                    let d = center(i) - center(j);
+                    let d = mi(center(i) - center(j));
                     let d2 = d.length_squared();
                     if d2 < 1e-12 {
                         return;
@@ -1458,10 +1483,12 @@ impl Sim {
                     }
                 }
             };
-            bounce(Vec2::X, p.x <= ri + EPS);
-            bounce(-Vec2::X, p.x >= w - ri - EPS);
-            bounce(Vec2::Y, p.y <= ri + EPS);
-            bounce(-Vec2::Y, p.y >= hgt - ri - EPS);
+            if !wrap {
+                bounce(Vec2::X, p.x <= ri + EPS);
+                bounce(-Vec2::X, p.x >= w - ri - EPS);
+                bounce(Vec2::Y, p.y <= ri + EPS);
+                bounce(-Vec2::Y, p.y >= hgt - ri - EPS);
+            }
 
             if i_multi {
                 *ext = (dv, count as f32);
@@ -1608,4 +1635,20 @@ impl Sim {
             };
         });
     }
+}
+
+/// Shortest displacement in a wrap-around world of size (w, h).
+#[inline(always)]
+fn min_image(mut d: Vec2, w: f32, h: f32) -> Vec2 {
+    if d.x > 0.5 * w {
+        d.x -= w;
+    } else if d.x < -0.5 * w {
+        d.x += w;
+    }
+    if d.y > 0.5 * h {
+        d.y -= h;
+    } else if d.y < -0.5 * h {
+        d.y += h;
+    }
+    d
 }

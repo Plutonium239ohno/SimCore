@@ -62,6 +62,34 @@ pub struct Sample {
     /// Fissions per sim second over the last sample interval.
     pub fission_rate: f32,
     pub insertion: f32,
+    /// Thermal power from fission (W, real units: ~200 MeV per fission).
+    pub power_w: f64,
+    /// Mean kinetic temperature of the matter (K): every nucleus counts,
+    /// pumped flow included.
+    pub temperature_k: f64,
+    /// Hottest conducting wall (K), 0 if there is none.
+    pub hottest_wall_k: f64,
+}
+
+/// Real energy per fission (MeV) and joules per MeV.
+pub const MEV_PER_FISSION: f64 = 200.0;
+pub const JOULES_PER_MEV: f64 = 1.602e-13;
+
+/// Write samples as CSV (time, neutrons, fission rate, power, rods, temperatures).
+pub fn write_samples_csv<'a>(path: &std::path::Path, samples: impl IntoIterator<Item = &'a Sample>) -> std::io::Result<usize> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(f, "time_s,free_neutrons,fissions_per_s,thermal_power_w,rod_insertion,mean_temperature_k,hottest_wall_k")?;
+    let mut n = 0;
+    for s in samples {
+        writeln!(f, "{:.2},{},{:.3},{:.4e},{:.3},{:.1},{:.1}", s.t, s.neutrons, s.fission_rate, s.power_w, s.insertion, s.temperature_k, s.hottest_wall_k)?;
+        n += 1;
+    }
+    f.flush()?;
+    Ok(n)
 }
 
 pub struct Reactor {
@@ -93,6 +121,9 @@ pub struct Reactor {
     pub refuels: u64,
     pub rod_captures: u64,
     pub samples: VecDeque<Sample>,
+    /// Every sample since the scene was loaded or cleared (the graphs only
+    /// keep the last `MAX_SAMPLES`): what "Export graphs" writes.
+    pub recording: Vec<Sample>,
     sample_timer: f32,
     fissions_at_sample: u64,
     site_timer: f32,
@@ -118,6 +149,7 @@ impl Default for Reactor {
             refuels: 0,
             rod_captures: 0,
             samples: VecDeque::new(),
+            recording: Vec::new(),
             sample_timer: 0.0,
             fissions_at_sample: 0,
             site_timer: 0.0,
@@ -494,7 +526,26 @@ pub fn update(sim: &mut Sim, dt: f32) {
         let f = sim.nuclear.fissions;
         let rate = f.saturating_sub(re.fissions_at_sample) as f32 / span;
         re.fissions_at_sample = f;
-        re.samples.push_back(Sample { t: sim.nuclear.time, neutrons, fission_rate: rate, insertion: re.insertion });
+        let (mut ke, mut count) = (0.0f64, 0u32);
+        for b in sim.bodies().values() {
+            if b.a() > 1 || b.z > 0 {
+                ke += 0.5 * (b.a().max(1) as f64) * b.vel.length_squared() as f64;
+                count += 1;
+            }
+        }
+        let theta = if count > 0 { (ke / count as f64) as f32 } else { 0.0 };
+        let hottest = sim.walls.segs.iter().filter(|w| w.kind.conducts()).map(|w| w.theta).fold(None, |m: Option<f32>, t| Some(m.map_or(t, |m| m.max(t))));
+        let sample = Sample {
+            t: sim.nuclear.time,
+            neutrons,
+            fission_rate: rate,
+            insertion: re.insertion,
+            power_w: rate as f64 * MEV_PER_FISSION * JOULES_PER_MEV,
+            temperature_k: if count > 0 { crate::thermal::kelvin_of(&sim.cfg, theta) } else { 0.0 },
+            hottest_wall_k: hottest.map_or(0.0, |t| crate::thermal::kelvin_of(&sim.cfg, t)),
+        };
+        re.recording.push(sample);
+        re.samples.push_back(sample);
         while re.samples.len() > MAX_SAMPLES {
             re.samples.pop_front();
         }

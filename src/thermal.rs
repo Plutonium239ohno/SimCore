@@ -50,6 +50,13 @@ pub fn format_kelvin(t: f64) -> String {
     }
 }
 
+/// Matter density (nucleons per 1000 px^2 at the game's nucleon radius 2)
+/// above which fast ions get the full `stopping` rate; less matter around
+/// them stops them proportionally less. Dense presets sit at 8-11.
+pub const DENSE_MATTER: f32 = 4.0;
+/// Radius (in nucleon radii) over which that density is measured.
+pub const DENSITY_REACH: f32 = 20.0;
+
 /// Heat capacity of a conducting wall per px of length, in bodies.
 pub const WALL_CAPACITY: f32 = 0.25;
 /// A freeze plug is a thick block of frozen salt, not a thin sheet.
@@ -172,6 +179,34 @@ pub fn apply(sim: &mut Sim, dt: f32) {
 
     // ---- Matter: stopping of fast ions, heat bath ----
     if cfg.matter {
+        // Stopping power is proportional to the density of the matter an
+        // ion crosses: full in dense matter, none in vacuum (an alpha that
+        // escaped the vessel flies on). Matter behind a wall doesn't count.
+        let dens_reach = DENSITY_REACH * r_n;
+        let dens_cell = dens_reach;
+        let mut dens_grid: HashMap<(i32, i32), Vec<usize>> = HashMap::default();
+        for (k, x) in b.iter().enumerate() {
+            if x.a > 0 && !(x.z == 0 && x.a == 1) {
+                dens_grid.entry(((x.com.x / dens_cell).floor() as i32, (x.com.y / dens_cell).floor() as i32)).or_default().push(k);
+            }
+        }
+        let walls = &sim.walls;
+        let matter_around = |k: usize| -> f32 {
+            let p = b[k].com;
+            let (cx, cy) = ((p.x / dens_cell).floor() as i32, (p.y / dens_cell).floor() as i32);
+            let mut a = 0u32;
+            for gy in cy - 1..=cy + 1 {
+                for gx in cx - 1..=cx + 1 {
+                    for &j in dens_grid.get(&(gx, gy)).map_or(&[][..], |v| &v[..]) {
+                        if j != k && b[j].com.distance_squared(p) < dens_reach * dens_reach && !walls.separates(p, b[j].com) {
+                            a += b[j].a;
+                        }
+                    }
+                }
+            }
+            let per_1000 = a as f32 / (std::f32::consts::PI * dens_reach * dens_reach) * 1000.0 * (2.0 / r_n).powi(2);
+            (per_1000 / DENSE_MATTER).min(1.0)
+        };
         let mut heat: Vec<(Vec2, f32, usize)> = Vec::new();
         let stop = (-cfg.stopping * dt).exp();
         let c = (-cfg.cooling * dt).exp();
@@ -188,7 +223,8 @@ pub fn apply(sim: &mut Sim, dt: f32) {
             let v_fast = speed_for(&cfg, 0.1 * x.a as f64, x.a as f32);
             let fast = st.fast.contains(&x.tag) || speed > v_fast;
             if fast && cfg.stopping > 0.0 {
-                let s2 = speed * stop;
+                let f = matter_around(k);
+                let s2 = speed * if f >= 1.0 { stop } else { (-cfg.stopping * f * dt).exp() };
                 let new_v = if speed > 1e-6 { v * (s2 / speed) } else { v };
                 let lost = 0.5 * x.mass * (speed * speed - s2 * s2);
                 v = new_v;

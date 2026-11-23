@@ -41,11 +41,13 @@ pub struct View {
     pub speed_scale: f32,
     /// Element view: write nuclide names next to nuclei.
     pub labels: bool,
+    /// Field drawn over the scene (temperature, neutron flux).
+    pub overlay: crate::overlay::OverlayKind,
 }
 
 impl Default for View {
     fn default() -> Self {
-        Self { mode: ViewMode::Normal, trails: false, trail_fade: 0.12, speed_scale: 500.0, labels: true }
+        Self { mode: ViewMode::Normal, trails: false, trail_fade: 0.12, speed_scale: 500.0, labels: true, overlay: crate::overlay::OverlayKind::None }
     }
 }
 
@@ -113,6 +115,8 @@ impl Target {
 pub struct Renderer {
     disc: Texture2D,
     opaque_mat: Material,
+    /// Temperature / flux overlay (see `View::overlay`).
+    pub overlay: crate::overlay::Overlay,
     trail: Option<Target>,
     colors: Vec<Color>,
     nuclei: HashMap<u32, (u32, u32, Vec2)>,
@@ -197,6 +201,7 @@ impl Renderer {
         Self {
             disc: disc_texture(),
             opaque_mat: material(OPAQUE_FRAG, None, vec![]),
+            overlay: Default::default(),
             trail: None,
             colors: Vec::new(),
             nuclei: HashMap::default(),
@@ -291,6 +296,12 @@ impl Renderer {
             self.draw_dots(sim);
         }
 
+        // ---- Overlay ----
+        self.overlay.kind = view.overlay;
+        self.overlay.update(sim);
+        self.overlay.prepare(sim);
+        self.overlay.draw();
+
         // ---- Walls ----
         draw_walls(sim);
         draw_reactor(sim);
@@ -358,6 +369,7 @@ impl Renderer {
                 ..Default::default()
             });
         }
+        self.overlay.draw();
         draw_walls(sim);
         draw_reactor(sim);
         set_default_camera();

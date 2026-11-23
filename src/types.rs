@@ -125,19 +125,30 @@ pub fn hsv(h: f32, s: f32, v: f32) -> Color {
     Color::new(r + m, g + m, b + m, 1.0)
 }
 
-/// Type-vs-type interaction strengths ("particle life" rules).
+/// Type-vs-type interaction rules ("particle life").
 /// `get(a, b)` = how strongly type `b` pulls on type `a` (negative = push).
 /// Deliberately allowed to be asymmetric: A can chase B while B flees A.
+/// Each cell also has its own range (a multiple of the global rule range)
+/// and an inner repulsion zone (`core`, a fraction of that range where the
+/// pair pushes apart whatever the strength: short-range repel, longer-range
+/// attract).
 #[derive(Clone, Debug)]
 pub struct RuleMatrix {
     pub n: usize,
     pub strength: Vec<f32>,
+    pub range: Vec<f32>,
+    pub core: Vec<f32>,
 }
+
+/// Limits of the per-cell settings.
+pub const RANGE_MIN: f32 = 0.25;
+pub const RANGE_MAX: f32 = 3.0;
+pub const CORE_MAX: f32 = 0.6;
 
 #[allow(dead_code)]
 impl RuleMatrix {
     pub fn zero(n: usize) -> Self {
-        Self { n, strength: vec![0.0; n * n] }
+        Self { n, strength: vec![0.0; n * n], range: vec![1.0; n * n], core: vec![0.0; n * n] }
     }
 
     #[inline]
@@ -153,20 +164,72 @@ impl RuleMatrix {
         &mut self.strength[a * self.n + b]
     }
 
-    /// Grow/shrink to `n` types, keeping existing entries.
-    pub fn resize(&mut self, n: usize) {
-        let mut s = vec![0.0; n * n];
-        let m = self.n.min(n);
-        for a in 0..m {
-            for b in 0..m {
-                s[a * n + b] = self.get(a, b);
-            }
-        }
-        self.n = n;
-        self.strength = s;
+    #[inline]
+    pub fn range_of(&self, a: usize, b: usize) -> f32 {
+        self.range[a * self.n + b]
     }
 
-    /// Randomize only the entries where both types satisfy `pick`.
+    pub fn set_range(&mut self, a: usize, b: usize, v: f32) {
+        self.range[a * self.n + b] = v.clamp(RANGE_MIN, RANGE_MAX);
+    }
+
+    #[inline]
+    pub fn core_of(&self, a: usize, b: usize) -> f32 {
+        self.core[a * self.n + b]
+    }
+
+    pub fn set_core(&mut self, a: usize, b: usize, v: f32) {
+        self.core[a * self.n + b] = v.clamp(0.0, CORE_MAX);
+    }
+
+    /// Copy every setting of cell (a, b) from cell (c, d) of `src`.
+    fn copy_cell(&mut self, a: usize, b: usize, src: &RuleMatrix, c: usize, d: usize) {
+        let (i, j) = (a * self.n + b, c * src.n + d);
+        self.strength[i] = src.strength[j];
+        self.range[i] = src.range[j];
+        self.core[i] = src.core[j];
+    }
+
+    /// Grow/shrink to `n` types, keeping existing entries.
+    pub fn resize(&mut self, n: usize) {
+        let old = self.clone();
+        *self = Self::zero(n);
+        let m = old.n.min(n);
+        for a in 0..m {
+            for b in 0..m {
+                self.copy_cell(a, b, &old, a, b);
+            }
+        }
+    }
+
+    /// Remove type `k` (later types move down one).
+    pub fn remove(&mut self, k: usize) {
+        let old = self.clone();
+        *self = Self::zero(old.n - 1);
+        for a in 0..self.n {
+            for b in 0..self.n {
+                self.copy_cell(a, b, &old, a + (a >= k) as usize, b + (b >= k) as usize);
+            }
+        }
+    }
+
+    /// Give type `to` the same rules as type `from`, both ways.
+    pub fn copy_type(&mut self, from: usize, to: usize) {
+        let old = self.clone();
+        for j in 0..self.n {
+            let jj = if j == to { from } else { j };
+            self.copy_cell(to, j, &old, from, jj);
+            self.copy_cell(j, to, &old, jj, from);
+        }
+    }
+
+    /// Largest range factor in use.
+    pub fn max_range(&self) -> f32 {
+        self.range.iter().copied().fold(RANGE_MIN, f32::max)
+    }
+
+    /// Randomize the strengths where both types satisfy `pick` (ranges and
+    /// cores are left alone).
     pub fn randomize_where(&mut self, pick: impl Fn(usize) -> bool) {
         for a in 0..self.n {
             for b in 0..self.n {
@@ -181,3 +244,4 @@ impl RuleMatrix {
         self.randomize_where(|_| true);
     }
 }
+

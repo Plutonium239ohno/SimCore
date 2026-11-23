@@ -14,6 +14,8 @@ pub struct Grid {
     pub inv: f32,
     pub cols: usize,
     pub rows: usize,
+    /// Wrap-around world: neighbour searches continue across the edges.
+    pub wrap: bool,
     /// start[c]..start[c+1] = indices (in sorted order) of particles in cell c.
     pub start: Vec<u32>,
     pub order: Vec<u32>,
@@ -70,6 +72,29 @@ impl Grid {
     #[inline(always)]
     pub fn for_each_near(&self, p: Vec2, reach: i32, mut f: impl FnMut(usize)) {
         let (cx, cy) = self.coords(p);
+        if self.wrap {
+            // Each cell at most once, even if the block is wider than the world.
+            let (cols, rows) = (self.cols as i32, self.rows as i32);
+            let ny = (2 * reach + 1).min(rows);
+            let nx = (2 * reach + 1).min(cols);
+            let xs = (cx - reach).rem_euclid(cols);
+            let xe = xs + nx - 1;
+            for k in 0..ny {
+                let row = ((cy - reach + k).rem_euclid(rows) * cols) as usize;
+                let mut span = |a: i32, b: i32| {
+                    for j in self.start[row + a as usize] as usize..self.start[row + b as usize + 1] as usize {
+                        f(j);
+                    }
+                };
+                if xe < cols {
+                    span(xs, xe);
+                } else {
+                    span(xs, cols - 1);
+                    span(0, xe - cols);
+                }
+            }
+            return;
+        }
         let x0 = (cx - reach).max(0) as usize;
         let x1 = (cx + reach).min(self.cols as i32 - 1) as usize;
         let y0 = (cy - reach).max(0) as usize;
