@@ -149,6 +149,9 @@ fn lepton_speed(cfg: &Config, t_mev: f64) -> f32 {
 pub enum EventKind {
     Fission,
     Fusion,
+    /// Nucleus-nucleus reaction where nothing heavier than the reactants
+    /// comes out: knock-out, charge exchange, spallation.
+    Breakup,
     Capture,
     Scatter,
     Decay,
@@ -157,9 +160,10 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 7] = [
+    pub const ALL: [EventKind; 8] = [
         EventKind::Fission,
         EventKind::Fusion,
+        EventKind::Breakup,
         EventKind::Capture,
         EventKind::Scatter,
         EventKind::Decay,
@@ -171,6 +175,7 @@ impl EventKind {
         match self {
             EventKind::Fission => "fission",
             EventKind::Fusion => "fusion",
+            EventKind::Breakup => "breakup",
             EventKind::Capture => "capture",
             EventKind::Scatter => "scattering",
             EventKind::Decay => "decay",
@@ -209,6 +214,25 @@ impl Event {
         let k = d.find("Q ")?;
         d[k + 2..].split_whitespace().next()?.parse().ok()
     }
+
+    /// Collision energy (MeV, centre of mass) if the entry states one
+    /// ("..., at 26.07 GeV").
+    pub fn energy(&self) -> Option<f64> {
+        let d = self.details();
+        let k = d.rfind("at ")?;
+        let mut it = d[k + 3..].split_whitespace();
+        let x: f64 = it.next()?.parse().ok()?;
+        let unit = match it.next()?.trim_end_matches(')') {
+            "meV" => 1e-9,
+            "eV" => 1e-6,
+            "keV" => 1e-3,
+            "MeV" => 1.0,
+            "GeV" => 1e3,
+            "TeV" => 1e6,
+            _ => return None,
+        };
+        Some(x * unit)
+    }
 }
 
 /// Events kept in the history (the oldest are dropped beyond this).
@@ -219,7 +243,14 @@ pub const HISTORY_MAX: usize = 100_000;
 pub struct NuclearState {
     pub counts: HashMap<Mode, u64>,
     pub captures: u64,
+    /// Nuclei merging into something heavier than either.
     pub fusions: u64,
+    /// Nucleus-nucleus reactions that only rearrange or chip pieces off.
+    pub breakups: u64,
+    /// Energy given out by exothermic reactions (Q > 0) and taken in by
+    /// endothermic ones (Q < 0, from the collision's kinetic energy), MeV.
+    pub q_released: f64,
+    pub q_absorbed: f64,
     pub fissions: u64,
     pub annihilations: u64,
     /// Total energy released by reactions and decays (MeV).
@@ -788,6 +819,22 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
     }
     let q = mass_excess(za, na) + mass_excess(zb, nb) - m_out;
     st.energy_released += q.max(0.0);
+    if q > 0.0 {
+        st.q_released += q;
+    } else {
+        st.q_absorbed -= q;
+    }
+
+    // Heaviest thing that came out: fusion makes something heavier than
+    // either reactant; otherwise it was a breakup.
+    let mut heaviest = if fissioned { 0 } else { rz + rn };
+    for s in &steps {
+        if let Step::Emit { z: x, n: y, .. } = s {
+            heaviest = heaviest.max(x + y);
+        }
+    }
+    let mut products = products;
+    sort_products(&mut products);
 
     let (big, small) = if aa >= ab { ((za, na), (zb, nb)) } else { ((zb, nb), (za, na)) };
     let (kind, ek) = if fissioned {
@@ -798,9 +845,12 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
     } else if (za, na) == (0, 1) || (zb, nb) == (0, 1) {
         st.captures += 1;
         ("neutron capture", EventKind::Capture)
-    } else {
+    } else if heaviest > (za + na).max(zb + nb) {
         st.fusions += 1;
         ("fusion", EventKind::Fusion)
+    } else {
+        st.breakups += 1;
+        ("breakup", EventKind::Breakup)
     };
     st.record(ek, format!(
         "{} + {} → {}  ({kind}, Q {:+.2} MeV, at {})",
@@ -811,6 +861,23 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
         format_energy(e),
     ));
     true
+}
+
+/// Heaviest first, so the same reaction always reads the same way.
+fn sort_products(p: &mut [String]) {
+    // "He-3" -> 3, "n"/"p" -> 1, "2n" -> 2, "γ" -> 0.
+    let mass = |s: &str| -> u32 {
+        if let Some((_, a)) = s.rsplit_once('-') {
+            return a.parse().unwrap_or(0);
+        }
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let k: u32 = digits.parse().unwrap_or(1);
+        match &s[digits.len()..] {
+            "n" | "p" => k,
+            _ => 0,
+        }
+    };
+    p.sort_by(|a, b| mass(b).cmp(&mass(a)).then_with(|| a.cmp(b)));
 }
 
 /// "25 meV", "3.4 keV", "14.1 MeV".

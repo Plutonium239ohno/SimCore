@@ -209,5 +209,5 @@ fn recording_exports_as_csv() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(n, rec.len());
     assert_eq!(text.lines().count(), rec.len() + 1);
-    assert!(text.starts_with("time_s,free_neutrons,fissions_per_s,thermal_power_w"));
+    assert!(text.starts_with("time_s,free_neutrons,fissions_per_s,fusions_per_s"));
 }

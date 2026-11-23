@@ -642,6 +642,13 @@ impl Gui {
         resp
     }
 
+    /// Tooltip `lines` when the mouse is over r.
+    pub fn tip_if_hover(&mut self, r: Rect, lines: Vec<String>) {
+        if self.hovered(&r) {
+            self.tooltip = Some(lines);
+        }
+    }
+
     /// Tooltip shown at the mouse after the frame (by the caller).
     pub fn tip(&mut self, lines: Vec<String>) {
         self.tooltip = Some(lines);

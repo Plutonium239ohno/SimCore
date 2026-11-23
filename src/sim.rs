@@ -826,6 +826,7 @@ impl Sim {
             crate::thermal::apply(self, dt);
             crate::nuclear::process(self, dt);
             crate::reactor::update(self, dt);
+            crate::reactor::sample(self, dt);
         }
 
         // Photons/neutrinos that left the box are gone.

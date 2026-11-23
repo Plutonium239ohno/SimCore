@@ -11,7 +11,7 @@
 //! moderated reactors are easy to control.
 
 use crate::nucdata;
-use crate::nuclear::{energy_of, place_nucleus};
+use crate::nuclear::{energy_of, place_nucleus, speed_for};
 use crate::reactions::E_THERMAL;
 use crate::sim::Sim;
 use crate::types::ids;
@@ -69,6 +69,53 @@ pub struct Sample {
     pub temperature_k: f64,
     /// Hottest conducting wall (K), 0 if there is none.
     pub hottest_wall_k: f64,
+    /// Events per sim second over the last interval.
+    pub fusion_rate: f32,
+    pub breakup_rate: f32,
+    pub capture_rate: f32,
+    pub decay_rate: f32,
+    /// Power (W) given out by exothermic reactions and taken in by
+    /// endothermic ones (fission, fusion, breakup, capture; not decays).
+    pub released_w: f64,
+    pub absorbed_w: f64,
+    /// Kinetic power (W) put in by spawners and beams.
+    pub beam_w: f64,
+}
+
+impl Sample {
+    /// Net reaction power (W): released minus absorbed.
+    pub fn net_w(&self) -> f64 {
+        self.released_w - self.absorbed_w
+    }
+}
+
+/// Running totals the samples are differences of.
+#[derive(Clone, Copy, Default)]
+struct Totals {
+    fissions: u64,
+    fusions: u64,
+    breakups: u64,
+    captures: u64,
+    decays: u64,
+    q_released: f64,
+    q_absorbed: f64,
+    beam_mev: f64,
+}
+
+impl Totals {
+    fn now(sim: &Sim, beam_mev: f64) -> Self {
+        let st = &sim.nuclear;
+        Totals {
+            fissions: st.fissions,
+            fusions: st.fusions,
+            breakups: st.breakups,
+            captures: st.captures,
+            decays: st.counts.values().sum(),
+            q_released: st.q_released,
+            q_absorbed: st.q_absorbed,
+            beam_mev,
+        }
+    }
 }
 
 /// Real energy per fission (MeV) and joules per MeV.
@@ -82,10 +129,31 @@ pub fn write_samples_csv<'a>(path: &std::path::Path, samples: impl IntoIterator<
         std::fs::create_dir_all(dir)?;
     }
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(f, "time_s,free_neutrons,fissions_per_s,thermal_power_w,rod_insertion,mean_temperature_k,hottest_wall_k")?;
+    writeln!(
+        f,
+        "time_s,free_neutrons,fissions_per_s,fusions_per_s,breakups_per_s,captures_per_s,decays_per_s,fission_power_w,reaction_power_released_w,reaction_power_absorbed_w,net_reaction_power_w,beam_power_w,rod_insertion,temperature_k,hottest_wall_k"
+    )?;
     let mut n = 0;
     for s in samples {
-        writeln!(f, "{:.2},{},{:.3},{:.4e},{:.3},{:.1},{:.1}", s.t, s.neutrons, s.fission_rate, s.power_w, s.insertion, s.temperature_k, s.hottest_wall_k)?;
+        writeln!(
+            f,
+            "{:.2},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.3},{:.1},{:.1}",
+            s.t,
+            s.neutrons,
+            s.fission_rate,
+            s.fusion_rate,
+            s.breakup_rate,
+            s.capture_rate,
+            s.decay_rate,
+            s.power_w,
+            s.released_w,
+            s.absorbed_w,
+            s.net_w(),
+            s.beam_w,
+            s.insertion,
+            s.temperature_k,
+            s.hottest_wall_k
+        )?;
         n += 1;
     }
     f.flush()?;
@@ -125,7 +193,9 @@ pub struct Reactor {
     /// keep the last `MAX_SAMPLES`): what "Export graphs" writes.
     pub recording: Vec<Sample>,
     sample_timer: f32,
-    fissions_at_sample: u64,
+    last: Totals,
+    /// Kinetic energy (MeV) spawners have put in so far.
+    pub beam_mev: f64,
     site_timer: f32,
 }
 
@@ -151,7 +221,8 @@ impl Default for Reactor {
             samples: VecDeque::new(),
             recording: Vec::new(),
             sample_timer: 0.0,
-            fissions_at_sample: 0,
+            last: Totals::default(),
+            beam_mev: 0.0,
             site_timer: 0.0,
         }
     }
@@ -417,6 +488,7 @@ pub fn update(sim: &mut Sim, dt: f32) {
                     if ok {
                         sp.acc -= 1.0;
                         sp.spawned += 1;
+                        re.beam_mev += energy_of(&sim.cfg, sp.vel.length(), (sp.z + sp.n) as f32);
                         added = true;
                         break;
                     }
@@ -448,6 +520,7 @@ pub fn update(sim: &mut Sim, dt: f32) {
                 if ok {
                     sp.acc -= 1.0;
                     sp.spawned += 1;
+                    re.beam_mev += energy_of(&sim.cfg, sp.vel.length(), (sp.z + sp.n) as f32);
                     added = true;
                 } else {
                     sp.acc = sp.acc.min(1.5); // blocked: try again next frame
@@ -516,41 +589,66 @@ pub fn update(sim: &mut Sim, dt: f32) {
         refuel(sim, &mut re, elapsed);
     }
 
-    // ---- Instruments ----
+    sim.reactor = re;
+}
+
+/// Instruments: every `SAMPLE_DT` of sim time, record rates, powers and
+/// temperatures. Runs in every nuclear scene (not only reactors).
+pub fn sample(sim: &mut Sim, dt: f32) {
+    let re = &mut sim.reactor;
     re.sample_timer += dt;
-    if re.sample_timer >= SAMPLE_DT {
-        let span = re.sample_timer;
-        re.sample_timer = 0.0;
-        let sizes = body_sizes(sim);
-        let neutrons = (0..sim.len()).filter(|&i| sim.kind[i] == ids::NEUTRON && sizes[sim.nuc[i] as usize] == 1).count() as u32;
-        let f = sim.nuclear.fissions;
-        let rate = f.saturating_sub(re.fissions_at_sample) as f32 / span;
-        re.fissions_at_sample = f;
-        let (mut ke, mut count) = (0.0f64, 0u32);
-        for b in sim.bodies().values() {
-            if b.a() > 1 || b.z > 0 {
-                ke += 0.5 * (b.a().max(1) as f64) * b.vel.length_squared() as f64;
-                count += 1;
+    if re.sample_timer < SAMPLE_DT {
+        return;
+    }
+    let span = re.sample_timer;
+    re.sample_timer = 0.0;
+    let now = Totals::now(sim, sim.reactor.beam_mev);
+    let last = sim.reactor.last;
+    sim.reactor.last = now;
+    let rate = |a: u64, b: u64| a.saturating_sub(b) as f32 / span;
+    let watts = |mev: f64| mev.max(0.0) / span as f64 * JOULES_PER_MEV;
+
+    let sizes = body_sizes(sim);
+    let neutrons = (0..sim.len()).filter(|&i| sim.kind[i] == ids::NEUTRON && sizes[sim.nuc[i] as usize] == 1).count() as u32;
+    // Temperature: random motion of the matter. Fast bodies (beams,
+    // fragments still being stopped: above ~0.1 MeV per nucleon) are not
+    // heat yet.
+    let (mut ke, mut count) = (0.0f64, 0u32);
+    for b in sim.bodies().values() {
+        if b.a() > 1 || b.z > 0 {
+            let a = b.a().max(1);
+            if b.vel.length() > speed_for(&sim.cfg, 0.1 * a as f64, a as f32) {
+                continue;
             }
-        }
-        let theta = if count > 0 { (ke / count as f64) as f32 } else { 0.0 };
-        let hottest = sim.walls.segs.iter().filter(|w| w.kind.conducts()).map(|w| w.theta).fold(None, |m: Option<f32>, t| Some(m.map_or(t, |m| m.max(t))));
-        let sample = Sample {
-            t: sim.nuclear.time,
-            neutrons,
-            fission_rate: rate,
-            insertion: re.insertion,
-            power_w: rate as f64 * MEV_PER_FISSION * JOULES_PER_MEV,
-            temperature_k: if count > 0 { crate::thermal::kelvin_of(&sim.cfg, theta) } else { 0.0 },
-            hottest_wall_k: hottest.map_or(0.0, |t| crate::thermal::kelvin_of(&sim.cfg, t)),
-        };
-        re.recording.push(sample);
-        re.samples.push_back(sample);
-        while re.samples.len() > MAX_SAMPLES {
-            re.samples.pop_front();
+            ke += 0.5 * a as f64 * b.vel.length_squared() as f64;
+            count += 1;
         }
     }
-    sim.reactor = re;
+    let theta = if count > 0 { (ke / count as f64) as f32 } else { 0.0 };
+    let hottest = sim.walls.segs.iter().filter(|w| w.kind.conducts()).map(|w| w.theta).fold(None, |m: Option<f32>, t| Some(m.map_or(t, |m| m.max(t))));
+    let fission_rate = rate(now.fissions, last.fissions);
+    let re = &mut sim.reactor;
+    let sample = Sample {
+        t: sim.nuclear.time,
+        neutrons,
+        fission_rate,
+        insertion: re.insertion,
+        power_w: fission_rate as f64 * MEV_PER_FISSION * JOULES_PER_MEV,
+        temperature_k: if count > 0 { crate::thermal::kelvin_of(&sim.cfg, theta) } else { 0.0 },
+        hottest_wall_k: hottest.map_or(0.0, |t| crate::thermal::kelvin_of(&sim.cfg, t)),
+        fusion_rate: rate(now.fusions, last.fusions),
+        breakup_rate: rate(now.breakups, last.breakups),
+        capture_rate: rate(now.captures, last.captures),
+        decay_rate: rate(now.decays, last.decays),
+        released_w: watts(now.q_released - last.q_released),
+        absorbed_w: watts(now.q_absorbed - last.q_absorbed),
+        beam_w: watts(now.beam_mev - last.beam_mev),
+    };
+    re.recording.push(sample);
+    re.samples.push_back(sample);
+    while re.samples.len() > MAX_SAMPLES {
+        re.samples.pop_front();
+    }
 }
 
 /// Centre of the core (mean of the fuel sites), for labels.
