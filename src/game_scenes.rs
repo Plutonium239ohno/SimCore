@@ -13,15 +13,18 @@ use crate::rng::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-/// Where scenes are saved: $XDG_DATA_HOME/nuclear-game/scenes
-/// (default ~/.local/share/nuclear-game/scenes).
+/// Where scenes are saved: $XDG_DATA_HOME/nuclear-game/scenes (default
+/// ~/.local/share/nuclear-game/scenes; on Windows %APPDATA%\nuclear-game\scenes).
 pub fn scene_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("NUCLEAR_GAME_SCENES") {
         return PathBuf::from(d);
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
+    // Windows: %APPDATA% (HOME is usually unset there).
+    let windows = cfg!(windows).then(|| std::env::var_os("APPDATA")).flatten().map(PathBuf::from);
+    let base = windows
+        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("nuclear-game").join("scenes")
 }
