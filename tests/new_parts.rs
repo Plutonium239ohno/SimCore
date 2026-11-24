@@ -287,3 +287,66 @@ fn decay_products_settle_in_matter_but_beams_fly() {
     let p = sim.bodies().values().map(|b| b.vel.length()).fold(0.0, f32::max);
     assert!(p > 0.98 * v0, "beam slowed from {v0:.0} to {p:.0} px/s");
 }
+
+/// A moving D + D pair: the products' energies follow real kinematics (the
+/// centre-of-mass motion is added to real velocities, not sim ones), and a
+/// deuteron beam knocking into protons can't pump them past what a real
+/// elastic collision gives.
+#[test]
+fn fusion_products_have_real_energies() {
+    let mut sim = vacuum();
+    sim.point_nuclei = true;
+    sim.cfg.tunneling = 1e6;
+    sim.cfg.drag = 0.0;
+    let v = speed_for(&sim.cfg, 14.8, 2.0); // 7.4 MeV/u
+    let mut worst = 0.0f64;
+    let mut fusions = 0;
+    // (Placed a frame apart: nuclei placed together count as one event's
+    // products, which don't react with each other.)
+    for k in 0..12 {
+        assert!(place_nucleus(&mut sim, vec2(360.0, 100.0 + k as f32 * 50.0), 1, 1, Vec2::ZERO));
+    }
+    run(&mut sim, 1);
+    for k in 0..12 {
+        assert!(place_nucleus(&mut sim, vec2(300.0, 100.0 + k as f32 * 50.0), 1, 1, vec2(v, 0.0)));
+    }
+    // Each proton as it is born (later it may bounce off other deuterons).
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..90 {
+        run(&mut sim, 1);
+        for (t, b) in sim.bodies() {
+            if (b.z, b.n) == (1, 0) && seen.insert(t) {
+                worst = worst.max(energy_of(&sim.cfg, b.vel.length(), 1.0));
+            }
+        }
+    }
+    fusions += sim.nuclear.fusions;
+    assert!(fusions > 0, "no fusion");
+    // Q 4.03 MeV + 7.4 MeV in the CM frame, p takes 3/4, CM at 1.85 MeV/u:
+    // at most (sqrt(8.6) + sqrt(1.85))^2 = 18.4 MeV.
+    assert!(worst < 19.5, "proton at {worst:.1} MeV");
+
+    // Beam deuterons into protons at rest: a real elastic hit gives a
+    // proton at most 8/9 of 14.8 MeV.
+    let mut sim = vacuum();
+    sim.point_nuclei = true;
+    sim.cfg.drag = 0.0;
+    sim.cfg.tunneling = 1e-9;
+    for k in 0..12 {
+        assert!(place_nucleus(&mut sim, vec2(360.0, 100.0 + k as f32 * 50.0), 1, 0, Vec2::ZERO));
+    }
+    run(&mut sim, 1);
+    for k in 0..12 {
+        assert!(place_nucleus(&mut sim, vec2(300.0, 100.0 + k as f32 * 50.0), 1, 1, vec2(v, 0.0)));
+    }
+    let mut worst = 0.0f64;
+    for _ in 0..60 {
+        run(&mut sim, 1);
+        for b in sim.bodies().values() {
+            if (b.z, b.n) == (1, 0) {
+                worst = worst.max(energy_of(&sim.cfg, b.vel.length(), 1.0));
+            }
+        }
+    }
+    assert!(worst > 3.0 && worst < 14.0, "knocked proton at {worst:.1} MeV");
+}

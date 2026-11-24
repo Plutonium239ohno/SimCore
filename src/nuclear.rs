@@ -341,6 +341,9 @@ pub struct NuclearState {
     /// Velocities at the start of the frame of the nuclei in `sweep`: a
     /// swept collision happens at the speed they came in with.
     sweep_vel: HashMap<u32, Vec2>,
+    /// Velocity of every charged nucleus at the start of the frame (by
+    /// tag): a fast elastic bounce is redone from these with real kinematics.
+    frame_vel: HashMap<u32, Vec2>,
     /// (nucleus tag, wall) contacts last frame, for conductor walls.
     pub(crate) wall_touch: HashSet<(u32, u32)>,
     /// Pairs of connected conductor walls, for the walls' `version`.
@@ -459,6 +462,37 @@ fn retag(sim: &mut Sim, fr: &mut Frame, members: &[usize]) -> u32 {
     t
 }
 
+/// Two-body split with real kinematics: pieces of mass mx and mr fly apart
+/// along `dir` with relative kinetic energy `e_mev`, about a centre of mass
+/// moving at sim velocity `v`. Sim speeds are a compressed (non-linear) map
+/// of real ones, so the boost must be added to real velocities: adding sim
+/// velocities turns a 3 MeV fusion proton from a moving pair into a 100 MeV
+/// one. Returns the sim velocities (x, rest).
+fn split_vel(cfg: &Config, v: Vec2, dir: Vec2, e_mev: f64, mx: f32, mr: f32) -> (Vec2, Vec2) {
+    let u = real_velocity(cfg, v);
+    let (mx, mr) = (mx.max(1e-3) as f64, mr.max(1e-3) as f64);
+    let w = (e_mev.max(0.0) * (mx + mr) / (mx * mr)).sqrt();
+    let (d0, d1) = (dir.x as f64 * w, dir.y as f64 * w);
+    let (fx, fr) = (mr / (mx + mr), mx / (mx + mr));
+    (sim_velocity(cfg, (u.0 + d0 * fx, u.1 + d1 * fx)), sim_velocity(cfg, (u.0 - d0 * fr, u.1 - d1 * fr)))
+}
+
+/// Sim velocity of a particle with `e_per_nucleon` MeV per nucleon of
+/// kinetic energy along `dir`, in a frame moving at sim velocity `v`.
+fn boosted(cfg: &Config, v: Vec2, dir: Vec2, e_per_nucleon: f64) -> Vec2 {
+    let u = real_velocity(cfg, v);
+    let w = e_per_nucleon.max(0.0).sqrt();
+    sim_velocity(cfg, (u.0 + dir.x as f64 * w, u.1 + dir.y as f64 * w))
+}
+
+/// Centre-of-mass sim velocity of masses ma, mb at sim velocities va, vb
+/// (real momentum is what is conserved).
+fn cm_velocity(cfg: &Config, va: Vec2, ma: f32, vb: Vec2, mb: f32) -> Vec2 {
+    let (ua, ub) = (real_velocity(cfg, va), real_velocity(cfg, vb));
+    let (ma, mb) = (ma as f64, mb as f64);
+    sim_velocity(cfg, ((ua.0 * ma + ub.0 * mb) / (ma + mb), (ua.1 * ma + ub.1 * mb) / (ma + mb)))
+}
+
 /// Two-body breakup: `x` (zx, nx) leaves `members` with relative kinetic
 /// energy `e_mev`, momentum conserved about velocity `v`. Returns the rest.
 fn emit(sim: &mut Sim, fr: &mut Frame, members: &[usize], zx: u32, nx: u32, e_mev: f64, v: Vec2) -> Option<Vec<usize>> {
@@ -467,11 +501,9 @@ fn emit(sim: &mut Sim, fr: &mut Frame, members: &[usize], zx: u32, nx: u32, e_me
     if rest.is_empty() {
         return None;
     }
-    let (mx, mr) = (x.len() as f32, rest.len() as f32);
-    let mu = mx * mr / (mx + mr);
-    let v_rel = speed_for(&sim.cfg, e_mev, mu);
-    set_vel(sim, &x, v + dir * (v_rel * mr / (mx + mr)));
-    set_vel(sim, &rest, v - dir * (v_rel * mx / (mx + mr)));
+    let (vx, vr) = split_vel(&sim.cfg, v, dir, e_mev, x.len() as f32, rest.len() as f32);
+    set_vel(sim, &x, vx);
+    set_vel(sim, &rest, vr);
     retag(sim, fr, &x);
     retag(sim, fr, &rest);
     Some(rest)
@@ -504,11 +536,9 @@ fn fission(sim: &mut Sim, fr: &mut Frame, members: &[usize], split: &reactions::
     heavy.extend_from_slice(&ns[(nl + nu) as usize..]);
     let prompt: Vec<usize> = ns[nl as usize..(nl + nu) as usize].to_vec();
 
-    let (al, ah) = (light.len() as f32, heavy.len() as f32);
-    let mu = al * ah / (al + ah);
-    let v_rel = speed_for(&sim.cfg, split.tke, mu);
-    set_vel(sim, &light, v + axis * (v_rel * ah / (al + ah)));
-    set_vel(sim, &heavy, v - axis * (v_rel * al / (al + ah)));
+    let (vl, vh) = split_vel(&sim.cfg, v, axis, split.tke, light.len() as f32, heavy.len() as f32);
+    set_vel(sim, &light, vl);
+    set_vel(sim, &heavy, vh);
     retag(sim, fr, &light);
     retag(sim, fr, &heavy);
     // Prompt neutrons leave from the surface (taken from the middle of the
@@ -521,7 +551,7 @@ fn fission(sim: &mut Sim, fr: &mut Frame, members: &[usize], split: &reactions::
         if out.x > rn && out.y > rn && out.x < sim.width - rn && out.y < sim.height - rn && !sim.walls.blocked(out, rn) {
             sim.pos[i] = out;
         }
-        sim.vel[i] = (v + u * speed_for(&sim.cfg, e, 1.0)).clamp_length_max(sim.cfg.max_speed);
+        sim.vel[i] = boosted(&sim.cfg, v, u, e);
         retag(sim, fr, &[i]);
     }
     // Prompt gammas (~7 MeV total).
@@ -582,13 +612,19 @@ pub fn note_fast(sim: &mut Sim, dt: f32) {
     let r_n = sim.types[ids::NEUTRON as usize].radius;
     let mut v = std::mem::take(&mut sim.nuclear.sweep);
     v.clear();
+    let mut fv = std::mem::take(&mut sim.nuclear.frame_vel);
+    fv.clear();
     for (tag, b) in sim.bodies() {
+        if b.z > 0 {
+            fv.insert(tag, b.vel);
+        }
         if b.z > 0 && b.vel.length() * dt > 2.0 {
             let r = if b.parts == 1 { sim.types[if b.a() == 1 { ids::PROTON } else { ids::NUCLEUS } as usize].radius } else { r_n * (b.a() as f32 / 0.9069).sqrt() };
             v.push((tag, b.pos, b.vel, r));
         }
     }
     sim.nuclear.sweep = v;
+    sim.nuclear.frame_vel = fv;
 }
 
 /// Run one frame of nuclear physics. Must be called right after the
@@ -709,11 +745,12 @@ pub fn process(sim: &mut Sim, dt: f32) {
     pairs.sort_unstable();
     pairs.dedup();
     let mut touching_now = HashSet::default();
+    let contact_pairs = pairs.clone();
     for (a, b) in pairs {
         let (ta, tb) = (comps[a as usize].tag, comps[b as usize].tag);
         let key = (ta.min(tb), ta.max(tb));
         touching_now.insert(key);
-        if st.touching.contains(&key) || comps[a as usize].consumed || comps[b as usize].consumed {
+        if comps[a as usize].consumed || comps[b as usize].consumed {
             continue;
         }
         if let (Some(ga), Some(gb)) = (st.grace.get(&ta), st.grace.get(&tb)) {
@@ -721,9 +758,13 @@ pub fn process(sim: &mut Sim, dt: f32) {
                 continue;
             }
         }
-        react(sim, &mut st, &mut fr, &mut comps, a as usize, b as usize);
+        if !st.touching.contains(&key) && react(sim, &mut st, &mut fr, &mut comps, a as usize, b as usize) {
+            continue;
+        }
+        elastic_bounce(sim, &st, &comps, a as usize, b as usize);
     }
     st.touching = touching_now;
+    cap_pileups(sim, &st, &comps, &contact_pairs);
     if points {
         neutron_encounters(sim, &mut st, &mut fr, &mut comps, &comp_of, n, dt);
     }
@@ -843,6 +884,143 @@ pub fn process(sim: &mut Sim, dt: f32) {
     sim.index_nuclei();
 }
 
+/// A fast charged nucleus bouncing off another without reacting: the
+/// solver bounces them in sim velocities, which (sim speeds being a
+/// compressed map of real ones) hands the lighter one far more energy than
+/// a real collision could - a 15 MeV deuteron would kick a proton to 50
+/// MeV, and trapped protons would pump themselves up to GeV. Keep the
+/// direction the solver scattered them in, but redo the energies as a real
+/// elastic collision (real momentum and energy conserved) from the
+/// velocities they came in with. Vacuum only; pairs the solver didn't
+/// deflect (a fast ion passing through) are left alone.
+const BOUNCE_MIN: f64 = 0.5;
+
+fn elastic_bounce(sim: &mut Sim, st: &NuclearState, comps: &[Comp], a: usize, b: usize) {
+    // In matter the stopping (applied during the frame too) is what decides
+    // where a fast ion's energy goes; redoing the bounce from the incoming
+    // velocities would undo it.
+    if sim.cfg.matter {
+        return;
+    }
+    let (ca, cb) = (&comps[a], &comps[b]);
+    if ca.z == 0 || cb.z == 0 || ca.members.is_empty() || cb.members.is_empty() {
+        return;
+    }
+    let moving = |t: &u32| st.fast.contains(t) || st.beam.contains(t) || st.hot.contains(t);
+    if !moving(&ca.tag) && !moving(&cb.tag) {
+        return;
+    }
+    let (Some(&va), Some(&vb)) = (st.frame_vel.get(&ca.tag), st.frame_vel.get(&cb.tag)) else { return };
+    let (w0, w1) = (va - vb, mean_vel(sim, &ca.members) - mean_vel(sim, &cb.members));
+    if (w1 - w0).length() < 0.1 * w0.length() {
+        return; // not deflected this frame
+    }
+    let dir = w1.normalize_or_zero();
+    if dir == Vec2::ZERO {
+        return;
+    }
+    let cfg = &sim.cfg;
+    let (ua, ub) = (real_velocity(cfg, va), real_velocity(cfg, vb));
+    let (ma, mb) = ((ca.z + ca.n) as f64, (cb.z + cb.n) as f64);
+    let w = ((ua.0 - ub.0).powi(2) + (ua.1 - ub.1).powi(2)).sqrt();
+    // Below BOUNCE_MIN (CM MeV): a slow knock (lattice neighbours, a recoil
+    // settling). Beyond FRAG_FULL per nucleon a real nucleus is
+    // shattered, not bounced back as a hard sphere: the
+    // solver's handling is left alone there.
+    if ma * mb / (ma + mb) * w * w < BOUNCE_MIN || w * w > FRAG_FULL {
+        return;
+    }
+    let w2 = (dir.x as f64 * w, dir.y as f64 * w);
+    let cm = ((ma * ua.0 + mb * ub.0) / (ma + mb), (ma * ua.1 + mb * ub.1) / (ma + mb));
+    let (fa, fb) = (mb / (ma + mb), ma / (ma + mb));
+    let na = sim_velocity(cfg, (cm.0 + w2.0 * fa, cm.1 + w2.1 * fa));
+    let nb = sim_velocity(cfg, (cm.0 - w2.0 * fb, cm.1 - w2.1 * fb));
+    let (ma_, mb_) = (ca.members.clone(), cb.members.clone());
+    set_vel(sim, &ma_, na);
+    set_vel(sim, &mb_, nb);
+}
+
+/// Backstop for pile-ups (three or more nuclei pressed together in one
+/// frame - a fast ion driven into two others): the solver pushes them
+/// apart in sim velocities, which can turn a 15 MeV hit into a 100 MeV
+/// proton. In vacuum nothing else adds energy to a touching cluster in a
+/// frame (bar an electric field), so if its real kinetic energy went up,
+/// its motion about its centre of mass is scaled back to what came in.
+fn cap_pileups(sim: &mut Sim, st: &NuclearState, comps: &[Comp], pairs: &[(u32, u32)]) {
+    if sim.cfg.matter || pairs.is_empty() {
+        return;
+    }
+    // Union-find over the touching comps.
+    let mut root: HashMap<u32, u32> = HashMap::default();
+    fn find(root: &mut HashMap<u32, u32>, x: u32) -> u32 {
+        let mut r = x;
+        while let Some(&p) = root.get(&r) {
+            if p == r {
+                break;
+            }
+            r = p;
+        }
+        root.insert(x, r);
+        r
+    }
+    for &(a, b) in pairs {
+        root.entry(a).or_insert(a);
+        root.entry(b).or_insert(b);
+        let (ra, rb) = (find(&mut root, a), find(&mut root, b));
+        if ra != rb {
+            root.insert(ra, rb);
+        }
+    }
+    let mut groups: HashMap<u32, Vec<usize>> = HashMap::default();
+    let keys: Vec<u32> = root.keys().copied().collect();
+    for k in keys {
+        let r = find(&mut root, k);
+        groups.entry(r).or_default().push(k as usize);
+    }
+    let cfg = sim.cfg.clone();
+    for (_, g) in groups {
+        if g.len() < 2 {
+            continue;
+        }
+        let mut pre = 0.0f64;
+        let mut post: Vec<(f64, (f64, f64))> = Vec::with_capacity(g.len());
+        let mut ok = true;
+        for &k in &g {
+            let c = &comps[k];
+            let Some(&v0) = st.frame_vel.get(&c.tag) else {
+                ok = false; // newborn (a reaction's energy is real) or neutral
+                break;
+            };
+            if c.consumed || c.members.is_empty() || sim.reactor.fields.iter().any(|f| f.e != Vec2::ZERO && f.rect.contains(com(sim, &c.members))) {
+                ok = false;
+                break;
+            }
+            let m = (c.z + c.n) as f64;
+            let u0 = real_velocity(&cfg, v0);
+            pre += m * (u0.0 * u0.0 + u0.1 * u0.1);
+            post.push((m, real_velocity(&cfg, mean_vel(sim, &c.members))));
+        }
+        if !ok {
+            continue;
+        }
+        let mt: f64 = post.iter().map(|p| p.0).sum();
+        let cm = (post.iter().map(|p| p.0 * p.1 .0).sum::<f64>() / mt, post.iter().map(|p| p.0 * p.1 .1).sum::<f64>() / mt);
+        let e_cm = mt * (cm.0 * cm.0 + cm.1 * cm.1);
+        let e_int: f64 = post.iter().map(|(m, u)| m * ((u.0 - cm.0).powi(2) + (u.1 - cm.1).powi(2))).sum();
+        if e_cm + e_int <= pre * 1.02 + 0.05 {
+            continue;
+        }
+        // Scale the internal motion (and, if even the drift is too much, all of it).
+        let (cm, k) = if e_cm < pre { (cm, ((pre - e_cm) / e_int.max(1e-12)).sqrt()) } else { ((0.0, 0.0), (pre / (e_cm + e_int)).sqrt()) };
+        for (&kk, &(_, u)) in g.iter().zip(&post) {
+            let un = (cm.0 + (u.0 - cm.0) * k, cm.1 + (u.1 - cm.1) * k);
+            let v = sim_velocity(&cfg, un);
+            let members = comps[kk].members.clone();
+            set_vel(sim, &members, v);
+        }
+    }
+}
+
 /// Try a reaction between touching nuclei a and b.
 /// Returns whether anything happened.
 fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp], a: usize, b: usize) -> bool {
@@ -851,7 +1029,10 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
         return false; // neutron + neutron: nothing binds
     }
     let (aa, ab) = ((za + na) as f32, (zb + nb) as f32);
-    let vel_of = |k: usize| st.sweep_vel.get(&comps[k].tag).copied().unwrap_or_else(|| mean_vel(sim, &comps[k].members));
+    let vel_of = |k: usize| {
+        // Velocities from before the solver bounced them apart this frame.
+        st.sweep_vel.get(&comps[k].tag).or_else(|| st.frame_vel.get(&comps[k].tag)).copied().unwrap_or_else(|| mean_vel(sim, &comps[k].members))
+    };
     let (va, vb) = (vel_of(a), vel_of(b));
     let (ca, cb) = (com(sim, &comps[a].members), com(sim, &comps[b].members));
     let mu = aa * ab / (aa + ab);
@@ -934,7 +1115,7 @@ fn react(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp
     }
     st.next_event += 1;
     fr.event = st.next_event;
-    let v = (va * aa + vb * ab) / (aa + ab);
+    let v = cm_velocity(&sim.cfg, va, aa, vb, ab);
     let single = comps[a].members.len() == 1 && comps[b].members.len() == 1;
     let (products, residue) = if sim.point_nuclei && single {
         // The compound nucleus is the heavier particle; the lighter is gone.
@@ -1126,7 +1307,10 @@ fn coalesce(mut z: u32, mut n: u32, t_mev: f64) -> Vec<(u32, u32)> {
 fn fragment(sim: &mut Sim, st: &mut NuclearState, fr: &mut Frame, comps: &mut [Comp], a: usize, b: usize, e: f64) -> bool {
     let (za, na, zb, nb) = (comps[a].z, comps[a].n, comps[b].z, comps[b].n);
     let (aa, ab) = (za + na, zb + nb);
-    let vel_of = |k: usize| st.sweep_vel.get(&comps[k].tag).copied().unwrap_or_else(|| mean_vel(sim, &comps[k].members));
+    let vel_of = |k: usize| {
+        // Velocities from before the solver bounced them apart this frame.
+        st.sweep_vel.get(&comps[k].tag).or_else(|| st.frame_vel.get(&comps[k].tag)).copied().unwrap_or_else(|| mean_vel(sim, &comps[k].members))
+    };
     let (va, vb) = (vel_of(a), vel_of(b));
     let (ca, cb) = (com(sim, &comps[a].members), com(sim, &comps[b].members));
     let (ua, ub) = (real_velocity(&sim.cfg, va), real_velocity(&sim.cfg, vb));
@@ -1676,14 +1860,13 @@ fn emit_point(sim: &mut Sim, fr: &mut Frame, i: usize, zx: u32, nx: u32, e_mev: 
         return None;
     }
     let (mx, mr) = ((zx + nx) as f32, (z + n - zx - nx) as f32);
-    let mu = mx * mr / (mx + mr);
-    let v_rel = speed_for(&sim.cfg, e_mev, mu);
     let dir = random_unit();
+    let (vx, vr) = split_vel(&sim.cfg, v, dir, e_mev, mx, mr);
     sim.set_point(i, z - zx, n - nx);
-    sim.vel[i] = (v - dir * (v_rel * mx / (mx + mr))).clamp_length_max(sim.cfg.max_speed);
+    sim.vel[i] = vr;
     let gap = body_radius(sim, zx, nx) + sim.types[sim.kind[i] as usize].radius + 0.5;
     let at = spot_near(sim, sim.pos[i], dir, gap, 2.0);
-    spawn_body(sim, fr, at, v + dir * (v_rel * mr / (mx + mr)), zx, nx);
+    spawn_body(sim, fr, at, vx, zx, nx);
     retag(sim, fr, &[i]);
     Some(())
 }
@@ -1698,20 +1881,18 @@ fn fission_point(sim: &mut Sim, fr: &mut Frame, i: usize, split: &reactions::Fis
     }
     let axis = random_unit();
     let c = sim.pos[i];
-    let (al, ah) = ((zl + nl) as f32, (zh + nh) as f32);
-    let mu = al * ah / (al + ah);
-    let v_rel = speed_for(&sim.cfg, split.tke, mu);
+    let (vl, vh) = split_vel(&sim.cfg, v, axis, split.tke, (zl + nl) as f32, (zh + nh) as f32);
     let r = POINT_RADIUS + 0.5;
     sim.set_point(i, zl, nl);
     sim.pos[i] = spot_near(sim, c, axis, r, r);
-    sim.vel[i] = (v + axis * (v_rel * ah / (al + ah))).clamp_length_max(sim.cfg.max_speed);
+    sim.vel[i] = vl;
     retag(sim, fr, &[i]);
     let at = spot_near(sim, c, -axis, r, r);
-    spawn_body(sim, fr, at, v - axis * (v_rel * al / (al + ah)), zh, nh);
+    spawn_body(sim, fr, at, vh, zh, nh);
     for &e in &split.neutrons {
         let u = random_unit();
         let at = spot_near(sim, c, u, 2.0 * r, 2.0);
-        spawn_body(sim, fr, at, v + u * speed_for(&sim.cfg, e, 1.0), 0, 1);
+        spawn_body(sim, fr, at, boosted(&sim.cfg, v, u, e), 0, 1);
     }
     for _ in 0..3 {
         photon(sim, fr, c);
