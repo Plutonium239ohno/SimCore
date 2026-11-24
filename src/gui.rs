@@ -312,6 +312,64 @@ impl Gui {
         self.y += 24.0;
     }
 
+    /// Collapsible section header: click to open or close it. Returns
+    /// whether it's open (draw its contents only then). `badge` is shown
+    /// dimmed on the right (a count, a state).
+    pub fn section(&mut self, title: &str, badge: &str, open: &mut bool) -> bool {
+        self.collapsible(title, badge, open, true)
+    }
+
+    /// A smaller collapsible header inside a section (one item of a list).
+    pub fn subsection(&mut self, title: &str, badge: &str, open: &mut bool) -> bool {
+        self.collapsible(title, badge, open, false)
+    }
+
+    fn collapsible(&mut self, title: &str, badge: &str, open: &mut bool, top: bool) -> bool {
+        self.y += if top { 6.0 } else { 2.0 };
+        let h = if top { 26.0 } else { 28.0 };
+        let r = Rect::new(self.x, self.y, self.w, h);
+        let shown = title.split_once("##").map_or(title, |p| p.0);
+        let shown = if top { shown.to_uppercase() } else { shown.to_string() };
+        if self.visible(&r) {
+            let id = self.id(&format!("section {title}"));
+            let (clicked, hov, _) = self.press_box(id, r);
+            if top {
+                if hov {
+                    draw_rectangle(r.x - 4.0, r.y, r.w + 4.0, r.h, col::HOVER);
+                }
+            } else {
+                draw_rectangle(r.x, r.y, r.w, r.h, if hov { col::HOVER } else { col::WIDGET });
+                draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, if *open { col::ACCENT } else { col::EDGE });
+            }
+            let size = if top { self.size - 3.0 } else { self.size - 1.0 };
+            let c = if top { col::ACCENT } else { col::TEXT };
+            // Disclosure triangle (the font has no arrow glyphs).
+            let (tx, ty) = (r.x + if top { 4.0 } else { 9.0 }, r.y + h * 0.5);
+            let tc = if top { col::ACCENT } else { col::DIM };
+            if *open {
+                draw_triangle(vec2(tx - 4.0, ty - 2.5), vec2(tx + 4.0, ty - 2.5), vec2(tx, ty + 3.0), tc);
+            } else {
+                draw_triangle(vec2(tx - 2.5, ty - 4.0), vec2(tx - 2.5, ty + 4.0), vec2(tx + 3.0, ty), tc);
+            }
+            let x0 = r.x + if top { 14.0 } else { 20.0 };
+            let bw = if badge.is_empty() { 0.0 } else { self.text_width(badge, size - 1.0) + 8.0 };
+            let (t, _) = self.fit(&shown, r.w - (x0 - r.x) - bw - 8.0, size);
+            self.text(&t, x0, r.y + (h - size) * 0.5 - 1.0, size, c);
+            if !badge.is_empty() {
+                self.text(badge, r.x + r.w - bw + (if top { 8.0 } else { 2.0 }), r.y + (h - size) * 0.5, size - 1.0, col::DIM);
+            }
+            if top {
+                let tw = self.text_width(&t, size) + 14.0;
+                draw_line(r.x + tw + 8.0, r.y + 13.0, r.x + r.w - bw - 4.0, r.y + 13.0, 1.0, col::EDGE);
+            }
+            if clicked {
+                *open = !*open;
+            }
+        }
+        self.y += h + 4.0;
+        *open
+    }
+
     /// Two-column "key   value" row.
     pub fn kv(&mut self, k: &str, v: &str, vc: Color) {
         let h = self.size * 1.35;
@@ -624,6 +682,7 @@ impl Gui {
         draw_rectangle(r.x, r.y, r.w, r.h, if focused { Color::new(0.1, 0.11, 0.16, 1.0) } else { col::TRACK });
         draw_rectangle_lines(r.x, r.y, r.w, r.h, if focused { 1.5 } else { 1.0 }, if focused { col::ACCENT } else if hov { col::DIM } else { col::EDGE });
         let size = self.size;
+        let label = label.split_once("##").map_or(label, |p| p.0);
         let lw = self.text_width(label, size - 2.0);
         self.text(label, r.x + 8.0, r.y + 7.0, size - 2.0, col::DIM);
         let tx = r.x + 16.0 + lw;

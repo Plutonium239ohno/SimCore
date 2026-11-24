@@ -216,6 +216,7 @@ fn new_parts_survive_save_and_load() {
     sim.reactor.detectors.push(Detector::new(DetShape::Line(vec2(1.0, 2.0), vec2(3.0, 400.0)), DetectFilter::Isotope(1, 2), true));
     sim.reactor.rules.push(Rule::new(Trigger::Above(Measure::Neutrons, 50.0), Action::Scram));
     sim.reactor.controller = Controller::new(Measure::FissionRate, 2.0, sim_core::control::Actuator::Rods);
+    sim.reactor.auto_on = false;
     let text = scenes::to_text(&sim);
     let mut other = vacuum();
     scenes::from_text(&mut other, &text).unwrap();
@@ -227,6 +228,10 @@ fn new_parts_survive_save_and_load() {
     assert!(re.detectors[0].light);
     assert_eq!(re.rules[0].trigger, Trigger::Above(Measure::Neutrons, 50.0));
     assert!(re.controller.on);
+    assert!(!re.auto_on, "automation switched off stays off");
+    let mut fresh = vacuum();
+    scenes::from_text(&mut fresh, &scenes::to_text(&vacuum())).unwrap();
+    assert!(fresh.reactor.auto_on);
 }
 
 #[test]
@@ -349,4 +354,21 @@ fn fusion_products_have_real_energies() {
         }
     }
     assert!(worst > 3.0 && worst < 14.0, "knocked proton at {worst:.1} MeV");
+}
+
+/// The automation switch: off, rules and the controller do nothing (and
+/// keep their settings); on again, they act.
+#[test]
+fn automation_switch_holds_rules() {
+    let mut sim = vacuum();
+    sim.reactor.rods.push(sim_core::reactor::Rod { x: 100.0, top: 100.0, len: 300.0, half_w: 3.0 });
+    sim.reactor.target = 1.0;
+    sim.reactor.rules.push(Rule::new(Trigger::At(0.2), Action::Rods(0.25)));
+    sim.reactor.auto_on = false;
+    run(&mut sim, 30);
+    assert_eq!(sim.reactor.target, 1.0);
+    assert_eq!(sim.reactor.rules[0].fired, 0);
+    sim.reactor.auto_on = true;
+    run(&mut sim, 2);
+    assert_eq!(sim.reactor.target, 0.25);
 }

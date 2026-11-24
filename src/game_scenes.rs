@@ -223,6 +223,9 @@ pub fn to_text(sim: &Sim) -> String {
         if re.throttle != 1.0 {
             let _ = writeln!(s, "throttle {}", re.throttle);
         }
+        if !re.auto_on {
+            let _ = writeln!(s, "auto off");
+        }
         for d in &re.drains {
             let _ = writeln!(s, "drain {} {} {} {} {} {}", d.rect.x, d.rect.y, d.rect.w, d.rect.h, d.filter.code(), d.per_second);
         }
@@ -359,6 +362,7 @@ pub fn from_text(sim: &mut Sim, text: &str) -> Result<(), String> {
                 }
             }
             Some("throttle") => sim.reactor.throttle = num(1).clamp(0.0, 1.0),
+            Some("auto") => sim.reactor.auto_on = f.get(1) != Some(&"off"),
             Some("drain") => {
                 let mut d = Drain::new(Rect::new(num(1) * scale, num(2) * scale, num(3) * scale, num(4) * scale), DrainFilter::from_code(num(5) as u8));
                 d.per_second = num(6);
@@ -478,7 +482,7 @@ pub const PRESETS: [(&str, &str); 15] = [
     ("D-D fusion plasma", "hot deuterium alone: D + D → He-3 + n or T + p, about half each (3-4 MeV); needs hotter plasma than D-T"),
     ("D-He-3 fusion plasma", "deuterium + helium-3: D + He-3 → He-4 + p (18.4 MeV), almost no neutrons - but even hotter"),
     ("p-B-11 fusion plasma", "protons + boron-11: p + B-11 → 3 He-4 (8.7 MeV), no neutrons at all; the hardest to light (tunnelling ×30)"),
-    ("Magnetic bottle", "D-T plasma held in a magnetic field and topped up by fuel feeds: the ions circle and stay in, the fusion products heat it (watch it ignite), the neutrons fly straight out to the detectors; the Auto tab can throttle the feeds"),
+    ("Magnetic bottle", "D-T plasma held in a magnetic field and topped up by fuel feeds: the ions circle and stay in, the fusion products heat it (watch it ignite), the neutrons fly straight out to the detectors; the automation on the Controls tab can throttle the feeds"),
     ("Neutron generator", "a 1 MeV deuteron beam into a solid tritium target (tunnelling ×300): D + T → He-4 + 14 MeV neutron; as deuterium builds up in the target, D + D joins in (real generators see this too)"),
     ("Spallation source", "a 1 GeV proton beam on a lead target: each proton shatters a nucleus and boils off a shower of neutrons"),
     ("Heavy-ion collider", "two Ca-40 beams at 30 MeV/u each, head-on (120 MeV/u as a beam on a target): the nuclei shatter (fragmentation); detectors count the charged and neutral debris"),

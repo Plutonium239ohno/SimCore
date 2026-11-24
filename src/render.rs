@@ -443,7 +443,7 @@ pub fn draw_reactor(sim: &Sim) {
         }
         draw_circle(p.x, p.y, 1.2, c);
     }
-    for f in &re.fields {
+    for (fk, f) in re.fields.iter().enumerate() {
         let r = f.rect;
         let (fill, edge) = if f.b != 0.0 { (Color::new(0.55, 0.35, 1.0, 0.06), Color::new(0.7, 0.55, 1.0, 0.5)) } else { (Color::new(0.3, 0.9, 1.0, 0.05), Color::new(0.4, 0.9, 1.0, 0.5)) };
         draw_rectangle(r.x, r.y, r.w, r.h, fill);
@@ -480,7 +480,7 @@ pub fn draw_reactor(sim: &Sim) {
             (true, false) => "E field",
             _ => "B field",
         };
-        draw_text(label, r.x + 3.0, r.y + 11.0, 13.0, edge);
+        draw_text(&format!("F{}  {label}", fk + 1), r.x + 3.0, r.y + 11.0, 13.0, edge);
     }
     for (k, d) in re.detectors.iter().enumerate() {
         let c = Color::new(0.55, 1.0, 0.6, 0.75);
@@ -497,7 +497,7 @@ pub fn draw_reactor(sim: &Sim) {
             }
         }
     }
-    for sp in &re.spawners {
+    for (sk, sp) in re.spawners.iter().enumerate() {
         let c = Color::from_rgba(255, 210, 90, 230);
         if sp.beam && sp.width > 0.5 && sp.vel.length() > 0.5 {
             let d = sp.vel.normalize();
@@ -515,7 +515,7 @@ pub fn draw_reactor(sim: &Sim) {
             draw_line(tip.x, tip.y, tip.x + back.x + side.x, tip.y + back.y + side.y, 1.0, c);
             draw_line(tip.x, tip.y, tip.x + back.x - side.x, tip.y + back.y - side.y, 1.0, c);
         }
-        draw_text(&sp.label(), sp.pos.x + 6.0, sp.pos.y - 6.0, 13.0, c);
+        draw_text(&format!("S{}  {}", sk + 1, sp.label()), sp.pos.x + 6.0, sp.pos.y - 6.0, 13.0, c);
     }
     for d in &re.drains {
         let r = d.rect;

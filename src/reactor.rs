@@ -214,6 +214,9 @@ pub struct Reactor {
     pub throttle: f32,
     pub controller: crate::control::Controller,
     pub rules: Vec<crate::control::Rule>,
+    /// Master switch for the controller and rules (off: neither acts, each
+    /// keeps its own setting).
+    pub auto_on: bool,
     /// Set by a rule: the app should pause.
     pub pause_request: bool,
     /// Messages for the app's status line (rules that fired).
@@ -252,6 +255,7 @@ impl Default for Reactor {
             throttle: 1.0,
             controller: crate::control::Controller::default(),
             rules: Vec::new(),
+            auto_on: true,
             pause_request: false,
             notices: Vec::new(),
             pool: crate::inventory::Pool::default(),

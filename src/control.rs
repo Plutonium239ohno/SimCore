@@ -466,6 +466,9 @@ fn fire(re: &mut Reactor, a: Action) {
 
 /// Run the controller and the rules. Call once per frame after sampling.
 pub fn update(sim: &mut Sim) {
+    if !sim.reactor.auto_on {
+        return;
+    }
     let mut c = sim.reactor.controller;
     c.update(sim);
     sim.reactor.controller = c;
