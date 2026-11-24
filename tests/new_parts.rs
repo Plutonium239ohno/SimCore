@@ -263,3 +263,27 @@ fn spawner_mixes_nuclides() {
     assert_eq!(other.reactor.spawners[0].nuclides(), vec![(1, 0, 3), (2, 2, 1)]);
     assert!(other.reactor.spawners[0].mix_random);
 }
+
+/// Decay products in matter settle down like their parents (the decay zoo),
+/// even with no atoms drawn around them; beam nuclei cross empty space.
+#[test]
+fn decay_products_settle_in_matter_but_beams_fly() {
+    let mut sim = game_sim(1200.0, 800.0);
+    sim.seed = 9;
+    sim.cfg.decay_scale = 0.02; // Po-210 decays within a second or two
+    assert!(place_nucleus(&mut sim, vec2(600.0, 400.0), 84, 126, Vec2::ZERO));
+    sim.index_nuclei();
+    run(&mut sim, 60 * 6);
+    assert!(sim.nuclear.history.iter().any(|e| e.text.starts_with("Po-210 →")), "no decay");
+    for b in sim.bodies().values() {
+        assert!(b.vel.length() < 30.0, "{} still flying at {:.0} px/s", sim_core::nucdata::nuclide_name(b.z, b.n), b.vel.length());
+    }
+    // A beam through the same (implicit) matter keeps its speed.
+    let mut sim = game_sim(1200.0, 800.0);
+    let b = Spawner::beam(&sim.cfg, vec2(100.0, 400.0), 1, 0, Vec2::X, 50.0, 5.0);
+    let v0 = b.vel.length();
+    sim.reactor.spawners.push(b);
+    run(&mut sim, 30);
+    let p = sim.bodies().values().map(|b| b.vel.length()).fold(0.0, f32::max);
+    assert!(p > 0.98 * v0, "beam slowed from {v0:.0} to {p:.0} px/s");
+}

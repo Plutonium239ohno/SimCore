@@ -1556,14 +1556,24 @@ fn decay(
 /// disc centred on `at` (protons spread evenly through it). Returns false
 /// (adding nothing) if the space is occupied.
 pub fn place_nucleus(sim: &mut Sim, at: Vec2, z: u32, n: u32, vel: Vec2) -> bool {
-    let ok = place_nucleus_inner(sim, at, z, n, vel);
-    // Launched fast (over 1 MeV per nucleon): a genuine fast particle, like
-    // a beam's (see `NuclearState::beam`).
-    if ok && energy_of(&sim.cfg, vel.length(), 1.0) > 1.0 {
-        let t = sim.next_tag;
-        sim.nuclear.beam.insert(t);
+    let fast = energy_of(&sim.cfg, vel.length(), 1.0) > 1.0;
+    match place_nucleus_tag(sim, at, z, n, vel) {
+        Some(t) => {
+            // Launched fast (over 1 MeV per nucleon): a genuine fast
+            // particle, like a beam's (see `NuclearState::beam`).
+            if fast {
+                sim.nuclear.beam.insert(t);
+            }
+            true
+        }
+        None => false,
     }
-    ok
+}
+
+/// `place_nucleus`, returning the new nucleus's tag.
+pub fn place_nucleus_tag(sim: &mut Sim, at: Vec2, z: u32, n: u32, vel: Vec2) -> Option<u32> {
+    let first = sim.len();
+    (place_nucleus_inner(sim, at, z, n, vel) && sim.len() > first).then(|| sim.tag[first])
 }
 
 fn place_nucleus_inner(sim: &mut Sim, at: Vec2, z: u32, n: u32, vel: Vec2) -> bool {

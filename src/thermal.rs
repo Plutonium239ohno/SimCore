@@ -249,7 +249,14 @@ pub fn apply(sim: &mut Sim, dt: f32) {
                 let real = st.fast.contains(&x.tag) || st.beam.contains(&x.tag);
                 let per_u = energy_of(&cfg, speed, 1.0);
                 let g = if real { f * (1.0 / per_u.max(1e-9)).powf(0.8).min(1.0) as f32 } else { f };
-                bath = (-cfg.cooling * g * dt).exp();
+                // Beam nuclei and fragmentation debris cross empty space (a
+                // beam line, the gap to a detector) untouched. Everything else
+                // - decay and reaction products - sits in the scene's matter
+                // even where no atoms are drawn, and is cooled by it as
+                // before (else the products in the decay zoo flew forever).
+                if st.beam.contains(&x.tag) || st.hot.contains(&x.tag) {
+                    bath = (-cfg.cooling * g * dt).exp();
+                }
                 let s2 = speed * if g >= 1.0 { stop } else { (-cfg.stopping * g * dt).exp() };
                 let new_v = if speed > 1e-6 { v * (s2 / speed) } else { v };
                 let lost = 0.5 * x.mass * (speed * speed - s2 * s2);

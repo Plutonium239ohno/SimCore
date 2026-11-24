@@ -737,25 +737,25 @@ pub fn update(sim: &mut Sim, dt: f32) {
                 tries += 1;
                 let (z, n) = sp.peek();
                 let (at, v) = launch(sim, sp);
-                let mut ok = false;
+                let mut tag = None;
                 for k in 0..6 {
                     let p = if k == 0 { at } else { jitter(sim, z + n, at) };
-                    if place_nucleus(sim, p, z, n, v) {
-                        ok = true;
+                    tag = crate::nuclear::place_nucleus_tag(sim, p, z, n, v);
+                    if tag.is_some() {
                         break;
                     }
                 }
                 // Heavy nuclei (fuel salt) displace light carrier salt.
-                if !ok && z + n >= 20 && displace_light(sim, sp.pos, z + n) {
-                    ok = place_nucleus(sim, sp.pos, z, n, v);
+                if tag.is_none() && z + n >= 20 && displace_light(sim, sp.pos, z + n) {
+                    tag = crate::nuclear::place_nucleus_tag(sim, sp.pos, z, n, v);
                 }
+                let ok = tag.is_some();
                 if ok {
                     if sp.burst > 0 { sp.burst -= 1 } else { sp.acc -= 1.0 }
                     sp.spawned += 1;
                     sp.mix_next = sp.mix_next.wrapping_add(1);
                     re.beam_mev += energy_of(&sim.cfg, v.length(), (z + n) as f32);
-                    if sp.beam {
-                        let t = sim.next_tag;
+                    if let (true, Some(t)) = (sp.beam || energy_of(&sim.cfg, v.length(), 1.0) > 1.0, tag) {
                         sim.nuclear.beam.insert(t);
                     }
                     added = true;
