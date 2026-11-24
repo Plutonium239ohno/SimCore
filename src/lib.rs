@@ -25,3 +25,4 @@ pub mod zoom;
 pub mod overlay;
 pub mod history;
 pub mod game_scenes;
+pub mod selection;
