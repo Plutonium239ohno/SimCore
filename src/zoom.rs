@@ -47,6 +47,20 @@ impl Zoom {
         Rect::new(x, 10.0, self.size, self.size)
     }
 
+    /// A camera that draws world coordinates into the magnified window
+    /// (for tool previews on top of it); None while the zoom is off.
+    pub fn camera(&self, left: f32, main: Rect) -> Option<Camera2D> {
+        if self.state == ZoomState::Off {
+            return None;
+        }
+        let (src, dst) = (self.src(), self.dst(left, main));
+        let mut cam = Camera2D::from_display_rect(src);
+        // from_display_rect is y-up (meant for render targets); the screen is y-down.
+        cam.zoom.y = -cam.zoom.y;
+        cam.viewport = Some((dst.x as i32, (screen_height() - dst.y - dst.h) as i32, dst.w as i32, dst.h as i32));
+        Some(cam)
+    }
+
     pub fn clamp_center(&mut self, w: f32, h: f32) {
         let half = self.size / self.factor / 2.0;
         self.center.x = self.center.x.clamp(half.min(w / 2.0), (w - half).max(w / 2.0));
